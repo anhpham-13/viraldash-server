@@ -1,0 +1,54 @@
+{
+  "name": "viraldash-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "tsc -p tsconfig.json --noEmit",
+
+    "backend:dev":       "npm run dev       --prefix backend",
+    "backend:build":     "npm run build     --prefix backend",
+    "backend:start":     "npm run start     --prefix backend",
+    "backend:typecheck": "npm run typecheck --prefix backend",
+
+    "yt:dev":    "tsx watch crawler/youtube/index.ts",
+    "yt:search":  "tsx crawler/youtube/flow1-google-search.ts",
+    "yt:hashtag": "tsx crawler/youtube/flow2-hashtag-expand.ts",
+    "yt:channel": "tsx crawler/youtube/flow3-channel-expand.ts",
+
+    "flow:google-search":  "tsx crawler/youtube/flow1-google-search.ts",
+    "flow:hashtag-expand": "tsx crawler/youtube/flow2-hashtag-expand.ts",
+    "flow:channel-expand": "tsx crawler/youtube/flow3-channel-expand.ts",
+
+    "google-scout":  "tsx crawler/youtube/google-shorts-scout.ts",
+    "google-flow":   "tsx crawler/youtube/google-flow-orchestrator.ts",
+    "process-ssr":   "tsx crawler/youtube/process_ssr.ts",
+    "filter-id":     "tsx crawler/youtube/filter-google-ids.ts",
+    "process-total": "tsx crawler/youtube/process-id-filter-to-total.ts",
+
+    "tiktok:rapid":         "tsx crawler/tiktok/rapid.worker.ts",
+    "tiktok:google":        "tsx crawler/tiktok/google.worker.ts",
+    "tiktok:filter-id":     "tsx crawler/tiktok/filter-google-ids-tt.ts",
+    "tiktok:process-total": "tsx crawler/tiktok/process-id-filter-to-total-tt.ts",
+    "tiktok:normalize":     "tsx crawler/tiktok/normalize.ts",
+    "tiktok:aggregate":     "tsx crawler/tiktok/aggregator.ts",
+    "tiktok:all":           "tsx crawler/tiktok/index.ts",
+
+    "migrate:yt-dry":   "tsx crawler/scripts/migrate-yt-data.ts",
+    "migrate:yt-apply": "tsx crawler/scripts/migrate-yt-data.ts --apply"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.19",
+    "playwright": "^1.54.1",
+    "tsx": "^4.22.3",
+    "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "playwright-extra": "^4.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
+  }
+}
