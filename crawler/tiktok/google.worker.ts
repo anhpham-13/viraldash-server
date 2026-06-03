@@ -250,7 +250,7 @@ function serperSearchRequest(
     req.end();
   });
 }
-async function main() {
+export async function runGoogleWorker() {
   if (SERPER_API_KEYS.length === 0) {
     throw new Error("Missing SERPER_API_KEYS in .env");
   }
@@ -308,7 +308,7 @@ async function main() {
   );
 }
 
-main().catch((err) => {
+runGoogleWorker().catch((err) => {
   console.error(err);
   process.exit(1);
 });
