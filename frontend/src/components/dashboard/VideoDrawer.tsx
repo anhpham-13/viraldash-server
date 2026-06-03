@@ -50,15 +50,18 @@ export function VideoDrawer({ video, isOpen, onClose }: VideoDrawerProps) {
             <div className="bg-zinc-900 p-4 rounded-lg border border-zinc-800">
               <p className="text-xs text-zinc-500 mb-1 flex items-center"><Clock className="w-3 h-3 mr-1" /> Published</p>
               <p className="text-sm font-medium">
-                {(video.published_at ?? video.postDate)
-                  ? format(new Date(video.published_at ?? video.postDate), 'MMM d, yyyy HH:mm')
-                  : 'Unknown'}
+                {(() => {
+                  const dStr = video.published_at ?? video.postDate;
+                  if (!dStr) return 'Unknown';
+                  const d = new Date(dStr);
+                  return isNaN(d.getTime()) ? 'Unknown' : format(d, 'MMM d, yyyy HH:mm');
+                })()}
               </p>
             </div>
             <div className="bg-zinc-900 p-4 rounded-lg border border-zinc-800">
               <p className="text-xs text-zinc-500 mb-1">Channel ID</p>
-              <p className="text-sm font-medium font-mono text-zinc-300 break-all" title={video.snippet?.channelId || video.author || 'Unknown'}>
-                {video.snippet?.channelId || video.author || 'Unknown'}
+              <p className="text-sm font-medium font-mono text-zinc-300 break-all" title={typeof video.author === 'string' ? video.author : (video.author?.username || video.snippet?.channelId || 'Unknown')}>
+                {typeof video.author === 'string' ? video.author : (video.author?.username || video.snippet?.channelId || 'Unknown')}
               </p>
             </div>
           </div>
@@ -121,7 +124,7 @@ export function VideoDrawer({ video, isOpen, onClose }: VideoDrawerProps) {
 
           <h3 className="text-sm font-semibold text-zinc-400 mb-3 uppercase tracking-wider">Tags</h3>
           <div className="flex flex-wrap gap-2">
-            {video.tags && video.tags.length > 0 ? video.tags.map((tag: string) => (
+            {Array.isArray(video.tags) && video.tags.length > 0 ? video.tags.map((tag: string) => (
               <Badge key={tag} variant="secondary" className="bg-zinc-800 hover:bg-zinc-700 text-zinc-300">
                 #{tag}
               </Badge>
