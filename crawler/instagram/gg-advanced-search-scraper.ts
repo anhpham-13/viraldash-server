@@ -1,0 +1,214 @@
+import { chromium, type BrowserContext, type Page } from "playwright";
+import { resolve } from "node:path";
+import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { readJsonLines } from "../src/core/jsonl.js";
+
+// Cấu hình đường dẫn hệ thống
+const EXTENSION_PATH = resolve(process.cwd(), "crawler/extensions/nocaptchaai-extension");
+const OUTPUT_FILE = resolve(process.cwd(), "data/instagram/raw_google_output_ig.jsonl");
+const TOTAL_FILE = resolve(process.cwd(), "data/instagram/total_posts_ig.jsonl");
+
+// Cấu hình số luồng chạy song song (Tùy thuộc vào cấu hình RAM máy bạn, test ổn định ở mức 2 - 5 luồng)
+const CONCURRENCY = 5;
+
+/**
+ * Ma trận sinh Query: Trộn bộ chữ cái để ép Google lùng sục mọi ngách post/reel Instagram
+ * Chiến lược: dùng nhiều họ query khác nhau (phrase, intitle, OR, intent) để giảm trùng SERP.
+ */
+function generateInstagramQueries(): string[] {
+  const queries: string[] = [];
+  const alphabet = "abcdefghijklmnopqrstuvwxyz".split("");
+  const suffixes = [...alphabet, ..."0123456789".split("")];
+
+  for (const char1 of alphabet) {
+    for (const char2 of suffixes) {
+      const keyword = `${char1}${char2}`;
+
+      queries.push(`site:instagram.com/reel/ "${keyword}"`);
+      queries.push(`site:instagram.com/reel/ ${keyword}`);
+      queries.push(`site:instagram.com/reel/ intitle:"${keyword}"`);
+    }
+  }
+
+  return Array.from(new Set(queries)).sort(() => Math.random() - 0.5);
+}
+
+/**
+ * Hàm phân chia mảng query đều cho các Worker
+ */
+function chunkArray<T>(array: T[], size: number): T[][] {
+  const chunked: T[][] = [];
+  for (let i = 0; i < array.length; i += size) {
+    chunked.push(array.slice(i, i + size));
+  }
+  return chunked;
+}
+
+/**
+ * Hàm Trích xuất Instagram Reel/Post ID từ URL
+ * Định dạng nhận diện:
+ *   https://www.instagram.com/reel/ABC123xyz/
+ *   https://www.instagram.com/p/ABC123xyz/
+ */
+function extractInstagramId(url: string | undefined | null): string | null {
+  if (!url) return null;
+
+  try {
+    const firstSplit = url.split("?")[0];
+    if (!firstSplit) return null;
+
+    const cleanUrl = firstSplit.split("&")[0];
+    if (!cleanUrl) return null;
+
+    // Matches /reel/<shortcode> or /p/<shortcode>
+    const match = /\/(?:reel|p)\/([A-Za-z0-9_-]+)/.exec(cleanUrl);
+
+    return match && match[1] ? match[1] : null;
+  } catch (error) {
+    console.error("❌ Lỗi parse URL:", error);
+    return null;
+  }
+}
+
+async function loadExistingIds(): Promise<Set<string>> {
+  const ids = new Set<string>();
+
+  if (!existsSync(TOTAL_FILE)) return ids;
+
+  const rows = await readJsonLines<any>(TOTAL_FILE);
+  for (const row of rows) {
+    const id = String(row?.id ?? row?.postId ?? row?.reelId ?? "").trim();
+    if (id) ids.add(id);
+  }
+
+  return ids;
+}
+
+/**
+ * Logic xử lý lõi của từng Luồng trình duyệt (Worker Context)
+ */
+async function searchWorker(workerId: number, queries: string[], seenIds: Set<string>) {
+  console.log(`[Worker ${workerId}] 🔥 Khởi chạy thành công với ${queries.length} queries.`);
+
+  // Tạo Profile độc lập để cookie và cache của các luồng không đá nhau gây crash
+  const userDataDir = resolve(process.cwd(), `data/user_data_worker_${workerId}`);
+
+  const browserContext: BrowserContext = await chromium.launchPersistentContext(userDataDir, {
+    headless: false, // Bắt buộc để false để tiện ích noCaptcha AI hoạt động nhảy click chuột
+    args: [
+      `--disable-extensions-except=${EXTENSION_PATH}`,
+      `--load-extension=${EXTENSION_PATH}`,
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+    ],
+  });
+
+  const page: Page = await browserContext.newPage();
+
+  for (let i = 0; i < queries.length; i++) {
+    const query = queries[i]!;
+    console.log(`[Worker ${workerId}] [Query ${i + 1}/${queries.length}] 🔍 Google Search: ${query}`);
+
+    try {
+      // &tbs=qdr:d -> Chỉ lấy kết quả index trong 24 giờ qua | &num=100 -> Gom tối đa 100 kết quả trên 1 trang
+      const googleUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}&tbs=qdr:d&num=100&gl=us&hl=en`;
+
+      await page.goto(googleUrl, { waitUntil: "networkidle", timeout: 60000 });
+      await page.waitForTimeout(3000);
+
+      // 🚨 BỘ XỬ LÝ TỰ ĐỘNG VƯỢT CAPTCHA CỦA GOOGLE
+      if (page.url().includes("google.com/sorry")) {
+        console.warn(`[Worker ${workerId}] 🚨 Gặp CAPTCHA! Đang chờ noCaptcha AI Extension tự động giải quyết...`);
+
+        await page.waitForURL((url) => !url.href.includes("google.com/sorry"), { timeout: 45000 })
+          .then(() => console.log(`[Worker ${workerId}] 🎉 Vượt CAPTCHA thành công!`))
+          .catch(() => console.error(`[Worker ${workerId}] ❌ AI giải CAPTCHA quá thời gian (Timeout).`));
+      }
+
+      // Trích xuất toàn bộ liên kết chứa instagram.com/ và /reel/ hoặc /p/ từ Google SERP HTML
+      const links = await page.evaluate(() => {
+        const anchors = Array.from(document.querySelectorAll("a"));
+        return Array.from(new Set(
+          anchors
+            .map(a => a.href)
+            .filter(href =>
+              href.includes("instagram.com/") &&
+              (href.includes("/reel/") || href.includes("/p/"))
+            )
+        ));
+      });
+
+      let savedCount = 0;
+      for (const link of links) {
+        const postId = extractInstagramId(link);
+        if (!postId) continue;
+        if (seenIds.has(postId)) continue;
+
+        seenIds.add(postId);
+        const record = {
+          id: postId,
+          url: link.split("?")[0], // Clean URL để không dính các tham số thừa
+          fetchedAt: new Date().toISOString()
+        };
+
+        // Ghi trực tiếp bản ghi vào file dạng JSON Lines (Mỗi dòng là một Object JSON hoàn chỉnh)
+        appendFileSync(OUTPUT_FILE, JSON.stringify(record) + "\n", "utf-8");
+        savedCount++;
+      }
+
+      if (savedCount > 0) {
+        console.log(`[Worker ${workerId}] 💾 Đã bóc được ${savedCount} Instagram posts/reels cho vào file raw_google_output_ig.jsonl.`);
+      }
+
+      // Giãn cách nhẹ để tránh Google quét hành vi bot
+      await page.waitForTimeout(2000);
+
+    } catch (err: any) {
+      console.error(`[Worker ${workerId}] Lỗi xử lý query "${query}": ${err.message}`);
+    }
+  }
+
+  await browserContext.close();
+  console.log(`[Worker ${workerId}] ✅ Hoàn thành nhiệm vụ.`);
+}
+
+/**
+ * Entrypoint kích hoạt Pipeline Giai đoạn 1
+ */
+export async function runSearchPipeline() {
+  console.log("=======================================================");
+  console.log("🚀 KÍCH HOẠT PHASE 1: GOOGLE ADVANCED SEARCH FOR INSTAGRAM POSTS/REELS");
+  console.log("=======================================================");
+
+  // Đảm bảo thư mục dữ liệu tồn tại
+  const dataDir = resolve(process.cwd(), "data/instagram");
+  if (!existsSync(dataDir)) {
+    mkdirSync(dataDir, { recursive: true });
+  }
+
+  // Raw output is a fresh snapshot for each run.
+  writeFileSync(OUTPUT_FILE, "", "utf8");
+
+  const seenIds = await loadExistingIds();
+
+  const allQueries = generateInstagramQueries();
+  console.log(`📦 Tổng số lượng câu lệnh tìm kiếm ma trận: ${allQueries.length}`);
+
+  // Chia nhỏ danh sách cho số luồng Concurrency
+  const chunkSize = Math.ceil(allQueries.length / CONCURRENCY);
+  const chunks = chunkArray(allQueries, chunkSize);
+
+  console.log(`⚡ Hệ thống kích hoạt ${chunks.length} luồng Browser chạy song song...`);
+
+  // Bấm nút chạy
+  await Promise.all(
+    chunks.map((chunk, index) => searchWorker(index + 1, chunk, seenIds))
+  );
+
+  console.log("\n🏁🏁🏁 HOÀN THÀNH GIAI ĐOẠN 1!");
+  console.log(`📊 Kết quả ID và URL thô đã nằm tại: data/instagram/raw_google_output_ig.jsonl`);
+}
+
+
+runSearchPipeline().catch(console.error);
+
