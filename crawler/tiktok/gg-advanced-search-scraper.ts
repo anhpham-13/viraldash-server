@@ -5,18 +5,18 @@ import { readJsonLines } from "../src/core/jsonl.js";
 
 // Cấu hình đường dẫn hệ thống
 const EXTENSION_PATH = resolve(process.cwd(), "crawler/extensions/nocaptchaai-extension");
-const OUTPUT_FILE = resolve(process.cwd(), "data/youtube/raw_google_output_yt.jsonl");
-const TOTAL_FILE = resolve(process.cwd(), "data/youtube/total_vids_yt.jsonl");
-const LEGACY_TOTAL_FILE = resolve(process.cwd(), "data/total_video.jsonl");
+const OUTPUT_FILE = resolve(process.cwd(), "data/tiktok/raw_google_output_tt.jsonl");
+const TOTAL_FILE = resolve(process.cwd(), "data/tiktok/total_vids_tt.jsonl");
+const LEGACY_TOTAL_FILE = resolve(process.cwd(), "data/tiktok/total_video.jsonl");
 
 // Cấu hình số luồng chạy song song (Tùy thuộc vào cấu hình RAM máy bạn, test ổn định ở mức 2 - 5 luồng)
 const CONCURRENCY = 5;
 
 /**
- * Ma trận sinh Query: Trộn bộ chữ cái để ép Google lùng sục mọi ngách video Shorts của US
+ * Ma trận sinh Query: Trộn bộ chữ cái để ép Google lùng sục mọi ngách video TikTok
  * Chiến lược: dùng nhiều họ query khác nhau (phrase, intitle, OR, intent) để giảm trùng SERP.
  */
-function generateYouTubeShortsQueries(): string[] {
+function generateTikTokQueries(): string[] {
   const queries: string[] = [];
   const alphabet = "abcdefghijklmnopqrstuvwxyz".split("");
   const suffixes = [...alphabet, ..."0123456789".split("")];
@@ -25,9 +25,9 @@ function generateYouTubeShortsQueries(): string[] {
     for (const char2 of suffixes) {
       const keyword = `${char1}${char2}`;
 
-      queries.push(`site:youtube.com/shorts/ "${keyword}"`);
-      queries.push(`site:youtube.com/shorts/ ${keyword}`);
-      queries.push(`site:youtube.com/shorts/ intitle:"${keyword}"`);
+      queries.push(`site:tiktok.com/ "${keyword}"`);
+      queries.push(`site:tiktok.com/ ${keyword}`);
+      queries.push(`site:tiktok.com/ intitle:"${keyword}"`);
     }
   }
 
@@ -46,10 +46,10 @@ function chunkArray<T>(array: T[], size: number): T[][] {
 }
 
 /**
- * Hàm Trích xuất YouTube Video ID từ URL (Chuỗi 100% chuẩn 11 ký tự đặc trưng của YT)
- * Định dạng nhận diện: https://www.youtube.com/shorts/8u_OTViq_Bg
+ * Hàm Trích xuất TikTok Video ID từ URL
+ * Định dạng nhận diện: https://www.tiktok.com/@username/video/7343272991033085215
  */
-function extractYouTubeShortsId(url: string | undefined | null): string | null {
+function extractTikTokId(url: string | undefined | null): string | null {
   // 1. Kiểm tra đầu vào (Guarding clause): Nếu url không hợp lệ thì té sớm
   if (!url) return null;
 
@@ -61,8 +61,8 @@ function extractYouTubeShortsId(url: string | undefined | null): string | null {
     const cleanUrl = firstSplit.split("&")[0];
     if (!cleanUrl) return null;
 
-    // 3. Thực hiện quét Regex để bốc tách ID 11 ký tự
-    const match = /\/shorts\/([a-zA-Z0-9_-]{11})/.exec(cleanUrl);
+    // 3. Thực hiện quét Regex để bốc tách ID video tiktok (chuỗi số dài)
+    const match = /\/video\/([0-9]+)/.exec(cleanUrl);
 
     // Nếu match hợp lệ và có chứa group 1 (ID video)
     return match && match[1] ? match[1] : null;
@@ -129,22 +129,22 @@ async function searchWorker(workerId: number, queries: string[], seenIds: Set<st
           .catch(() => console.error(`[Worker ${workerId}] ❌ AI giải CAPTCHA quá thời gian (Timeout).`));
       }
 
-      // Trích xuất toàn bộ liên kết chứa youtube.com/shorts từ Google SERP HTML
+      // Trích xuất toàn bộ liên kết chứa tiktok.com/ và /video/ từ Google SERP HTML
       const links = await page.evaluate(() => {
         const anchors = Array.from(document.querySelectorAll("a"));
-        return Array.from(new Set(anchors.map(a => a.href).filter(href => href.includes("youtube.com/shorts/"))));
+        return Array.from(new Set(anchors.map(a => a.href).filter(href => href.includes("tiktok.com/") && href.includes("/video/"))));
       });
 
       let savedCount = 0;
       for (const link of links) {
-        const videoId = extractYouTubeShortsId(link);
+        const videoId = extractTikTokId(link);
         if (!videoId) continue;
         if (seenIds.has(videoId)) continue;
 
         seenIds.add(videoId);
         const record = {
           id: videoId,
-          url: `https://www.youtube.com/shorts/${videoId}`,
+          url: link.split("?")[0], // Clean URL để không dính các tham số thừa
           fetchedAt: new Date().toISOString()
         };
 
@@ -154,7 +154,7 @@ async function searchWorker(workerId: number, queries: string[], seenIds: Set<st
       }
 
       if (savedCount > 0) {
-        console.log(`[Worker ${workerId}] 💾 Đã bóc được ${savedCount} Shorts cho vào file gg_output.jsonl.`);
+        console.log(`[Worker ${workerId}] 💾 Đã bóc được ${savedCount} TikTok videos cho vào file raw_google_output_tt.jsonl.`);
       }
 
       // Giãn cách nhẹ để tránh Google quét hành vi bot
@@ -174,11 +174,11 @@ async function searchWorker(workerId: number, queries: string[], seenIds: Set<st
  */
 export async function runSearchPipeline() {
   console.log("=======================================================");
-  console.log("🚀 KÍCH HOẠT PHASE 1: GOOGLE ADVANCED SEARCH FOR YOUTUBE SHORTS");
+  console.log("🚀 KÍCH HOẠT PHASE 1: GOOGLE ADVANCED SEARCH FOR TIKTOK VIDEOS");
   console.log("=======================================================");
 
   // Đảm bảo thư mục dữ liệu tồn tại
-  const dataDir = resolve(process.cwd(), "data");
+  const dataDir = resolve(process.cwd(), "data/tiktok");
   if (!existsSync(dataDir)) {
     mkdirSync(dataDir, { recursive: true });
   }
@@ -188,7 +188,7 @@ export async function runSearchPipeline() {
 
   const seenIds = await loadExistingIds();
 
-  const allQueries = generateYouTubeShortsQueries();
+  const allQueries = generateTikTokQueries();
   console.log(`📦 Tổng số lượng câu lệnh tìm kiếm ma trận: ${allQueries.length}`);
 
   // Chia nhỏ danh sách cho số luồng Concurrency
@@ -203,8 +203,9 @@ export async function runSearchPipeline() {
   );
 
   console.log("\n🏁🏁🏁 HOÀN THÀNH GIAI ĐOẠN 1!");
-  console.log(`📊 Kết quả ID và URL thô đã nằm tại: data/youtube/raw_google_output_yt.jsonl`);
+  console.log(`📊 Kết quả ID và URL thô đã nằm tại: data/tiktok/raw_google_output_tt.jsonl`);
 }
 
 
 runSearchPipeline().catch(console.error);
+

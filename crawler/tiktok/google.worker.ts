@@ -180,6 +180,8 @@ function extractTikTokSeed(url: string): TikTokSeed | null {
   const author = match[1];
   const id = match[2];
 
+  if (!author || !id) return null;
+
   return {
     id,
     url: `https://www.tiktok.com/@${author}/video/${id}`,

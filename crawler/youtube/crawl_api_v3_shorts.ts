@@ -47,7 +47,7 @@ let keyIndex = 0;
 function getApiKey(): string {
   const key = API_KEYS[keyIndex % API_KEYS.length];
   keyIndex++;
-  return key;
+  return key!;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -211,7 +211,7 @@ async function searchVideos(params: {
   query: string;
   regionCode: string;
   order: SearchOrder;
-  pageToken?: string;
+  pageToken?: string | undefined;
 }): Promise<YouTubeSearchResponse> {
   const publishedAfter = new Date(
     Date.now() - 24 * 60 * 60 * 1000

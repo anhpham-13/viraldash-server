@@ -178,9 +178,9 @@ export async function runProcessIdFilterToTotal(): Promise<void> {
   console.log("Done.");
 }
 
-if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith("process-id-filter-to-total-tt.ts")) {
-  runProcessIdFilterToTotal().catch((error) => {
-    console.error(error);
-    process.exitCode = 1;
-  });
-}
+
+runProcessIdFilterToTotal().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
+

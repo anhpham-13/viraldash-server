@@ -56,10 +56,10 @@ async function loadExistingIdFilterRows(existingIds: Set<string>): Promise<Array
     const id = String(row?.id ?? "").trim();
     if (!id) continue;
     if (existingIds.has(id)) continue;
-    rows.push({ 
-      id, 
+    rows.push({
+      id,
       url: row?.url || `https://www.tiktok.com/@${row?.author || "user"}/video/${id}`,
-      author: row?.author || "" 
+      author: row?.author || ""
     });
   }
 
@@ -87,7 +87,7 @@ export async function runFilterGoogleIds(): Promise<void> {
     if (!id) continue;
     if (existingIds.has(id)) continue;
     if (existingFilterIds.has(id)) continue;
-    
+
     if (!filtered.has(id)) {
       const author = row?.data?.author || row?.author || "";
       const url = row?.data?.url || row?.url || `https://www.tiktok.com/@${author || "user"}/video/${id}`;
@@ -108,9 +108,8 @@ export async function runFilterGoogleIds(): Promise<void> {
 
 // ─── Entrypoint guard (standalone CLI) ───────────────────────────────────────
 
-if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith("filter-google-ids-tt.ts")) {
-  runFilterGoogleIds().catch((err) => {
-    console.error(err);
-    process.exitCode = 1;
-  });
-}
+runFilterGoogleIds().catch((err) => {
+  console.error(err);
+  process.exitCode = 1;
+});
+
