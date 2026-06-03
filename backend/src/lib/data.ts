@@ -22,11 +22,11 @@ const DATA_DIR = path.resolve(process.env['DATA_DIR'] ?? path.join(process.cwd()
 export function normalizeRecord(v: Record<string, unknown>): Record<string, unknown> {
   return {
     ...v,
-    video_id:     v['video_id']     ?? v['id']       ?? null,
-    published_at: v['published_at'] ?? v['postDate']  ?? null,
-    view_count:   v['view_count']   ?? v['views']     ?? 0,
-    tags:         v['tags']         ?? v['hashtags']  ?? [],
-    favorites:    v['favorites']    ?? v['saves']     ?? 0,
+    video_id: v['video_id'] ?? v['id'] ?? null,
+    published_at: v['published_at'] ?? v['postDate'] ?? null,
+    view_count: v['view_count'] ?? v['views'] ?? 0,
+    tags: v['tags'] ?? v['hashtags'] ?? [],
+    favorites: v['favorites'] ?? v['saves'] ?? 0,
   };
 }
 

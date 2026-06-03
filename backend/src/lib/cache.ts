@@ -112,18 +112,38 @@ class VideoStore {
   }
 
   private async _reload(): Promise<void> {
-    const [yt, tt] = await Promise.all([
+    const [rawYt, rawTt, rawIg] = await Promise.all([
       readJsonLines('youtube/viral_vids_yt.jsonl'),
       readJsonLines('tiktok/viral_vids_tt.jsonl'),
+      readJsonLines('instagram/viral_posts_ig.jsonl'),
     ]);
 
-    // Interleave YT and TT round-robin so that when rows are at the same viral_score
-    // both platforms appear on page 1 instead of TT being pushed to later pages.
+    const dedupe = (arr: Record<string, unknown>[]) => {
+      const map = new Map<string, Record<string, unknown>>();
+      const noId: Record<string, unknown>[] = [];
+      for (const item of arr) {
+        const id = (item['video_id'] ?? item['id']) as string | undefined;
+        if (id) {
+          map.set(id, item);
+        } else {
+          noId.push(item);
+        }
+      }
+      return [...map.values(), ...noId];
+    };
+
+    const yt = dedupe(rawYt);
+    const tt = dedupe(rawTt);
+    const ig = dedupe(rawIg);
+
+    // Interleave YT, TT, and IG round-robin so that when rows are at the same viral_score
+    // all platforms appear on page 1
     const interleaved: Record<string, unknown>[] = [];
-    const maxLen = Math.max(yt.length, tt.length);
+    const maxLen = Math.max(yt.length, tt.length, ig.length);
     for (let i = 0; i < maxLen; i++) {
       if (i < yt.length) interleaved.push(yt[i]!);
       if (i < tt.length) interleaved.push(tt[i]!);
+      if (i < ig.length) interleaved.push(ig[i]!);
     }
 
     this._data     = interleaved.map(toVideo);
@@ -131,9 +151,10 @@ class VideoStore {
 
     const ytCount = this._data.filter(v => v.platform === 'YouTube_Shorts').length;
     const ttCount = this._data.filter(v => v.platform === 'TikTok').length;
+    const igCount = this._data.filter(v => v.platform === 'Instagram_Reels').length;
     console.log(
       `[cache] reloaded — total: ${this._data.length}  `  +
-      `YT: ${ytCount}  TT: ${ttCount}  `                 +
+      `YT: ${ytCount}  TT: ${ttCount}  IG: ${igCount}  `                 +
       `at ${new Date().toISOString()}`
     );
   }

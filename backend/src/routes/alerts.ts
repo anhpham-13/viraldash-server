@@ -10,15 +10,17 @@ const PIPELINE_HEALTH_DROP_PCT = 0.15;
 export const alertsRouter = new Hono();
 
 alertsRouter.get('/', async (c) => {
-  const [ytViral, ttViral, ytTotal, ttTotal] = await Promise.all([
+  const [ytViral, ttViral, igViral, ytTotal, ttTotal, igTotal] = await Promise.all([
     readJsonLines('youtube/viral_vids_yt.jsonl'),
     readJsonLines('tiktok/viral_vids_tt.jsonl'),
+    readJsonLines('instagram/viral_posts_ig.jsonl'),
     readJsonLines('youtube/total_vids_yt.jsonl'),
     readJsonLines('tiktok/total_vids_tt.jsonl'),
+    readJsonLines('instagram/total_vids_ig.jsonl'),
   ]);
 
-  const viralVideos = [...ytViral, ...ttViral].map(normalizeRecord);
-  const totalVideos = [...ytTotal, ...ttTotal].map(normalizeRecord);
+  const viralVideos = [...ytViral, ...ttViral, ...igViral].map(normalizeRecord);
+  const totalVideos = [...ytTotal, ...ttTotal, ...igTotal].map(normalizeRecord);
 
   const enrichedViral: EnrichedVideo[] = viralVideos.map((v): EnrichedVideo => ({
     ...v,
