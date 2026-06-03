@@ -23,12 +23,18 @@ data/youtube/**
 data/tiktok/**
 !data/tiktok/.gitkeep
 
+# ── Scraped data outputs (instagram pipeline) ────────────────────────────────────
+data/instagram/**
+!data/instagram/.gitkeep
+
 # ── Dedup seen-index state (binary shard files) ───────────────────────────────
 data/seen_index_ssr/**
 !data/seen_index_ssr/.gitkeep
 
 # ── Playwright browser profiles created by workers ───────────────────────────
 data/user_data_worker_*/
+user_data_ig_worker_*/
+data/user_data_ig_debug/
 
 # ── OS / editor noise ─────────────────────────────────────────────────────────
 .DS_Store
