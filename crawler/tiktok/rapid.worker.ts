@@ -1,136 +1,160 @@
 import "dotenv/config";
-import fs from "node:fs";
+import { existsSync, appendFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { readJsonLines } from "../src/core/jsonl.js";
+import { withViralMetrics } from "../src/core/viral.calc.js";
 import { env } from "./config/env.js";
 
-const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
-const OUTPUT_FILE = resolve(process.cwd(), "output_json", "tiktok_rapid_raw.jsonl");
+const ID_FILTER_FILE = resolve(process.cwd(), "data/tiktok/id_filter_tt.jsonl");
+const TOTAL_FILE = resolve(process.cwd(), "data/tiktok/total_vids_tt.jsonl");
+const VIRAL_FILE = resolve(process.cwd(), "data/tiktok/viral_vids_tt.jsonl");
 
-function buildRapidEndpointCandidates(region: string, host?: string): Array<{ path: string; params: Record<string, string> }> {
-  if (host?.includes("scraper7")) {
-    return [
-      { path: "/feed/search", params: { keywords: "fyp", region: region.toLowerCase(), count: "10", cursor: "0", publish_time: "1", sort_type: "1" } },
-      { path: "/feed/search", params: { keywords: "trending", region: region.toLowerCase(), count: "10", cursor: "0", publish_time: "1", sort_type: "1" } },
-      { path: "/feed", params: { keywords: "fyp", region: region.toLowerCase(), count: "10" } },
-      { path: "/trending", params: { region: region.toLowerCase(), count: "10" } },
-    ];
+const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
+
+async function fetchRapidDetail(videoId: string): Promise<any | null> {
+  const config = env.rapidApiConfigs[0]; // Lấy key đầu tiên trong cấu hình
+  if (!config) {
+    throw new Error("No RapidAPI config found in env");
   }
 
-  return [
-    { path: `/trending/${encodeURIComponent(region)}`, params: {} },
-    { path: "/trending", params: { region } },
-    { path: "/trending", params: { country: region } },
-    { path: "/feed/trending", params: { region } },
-    { path: "/feed", params: { region } },
-    { path: "/videos/trending", params: { region } },
-    { path: "/search", params: { keyword: "trending", region } },
-    { path: "/search", params: { q: "trending", region } },
-  ];
-}
-
-async function tryRapidEndpoint(host: string, apiKey: string, path: string, params: Record<string, string>): Promise<unknown | null> {
+  // Dựa vào rapid_snippit.txt
+  // Path: /v1/post/7645024712342490386?region=US
+  const host = "tokapi-mobile-version.p.rapidapi.com"; 
+  const region = env.crawlRegions[0] || "US";
+  const path = `/v1/post/${videoId}?region=${region}`;
+  
   try {
-    const url = new URL(`https://${host}${path}`);
-    for (const [key, value] of Object.entries(params)) {
-      url.searchParams.set(key, value);
-    }
-
+    const url = `https://${host}${path}`;
+    
     const response = await fetch(url, {
       headers: {
-        "X-RapidAPI-Key": apiKey,
-        "X-RapidAPI-Host": host,
-        accept: "application/json",
+        "x-rapidapi-key": config.apiKey,
+        "x-rapidapi-host": host,
+        "Content-Type": "application/json",
         "user-agent": USER_AGENT,
       },
     });
 
     if (!response.ok) {
-      console.warn(`[rapid] API call failed: ${response.status} ${response.statusText} for ${path}`);
+      console.warn(`[RapidEnricher] API call failed: ${response.status} ${response.statusText} for video ${videoId}`);
       return null;
     }
 
-    const contentType = response.headers.get("content-type") ?? "";
-    if (contentType.includes("application/json")) {
-      return response.json();
-    }
-    const text = await response.text();
-    try {
-      return JSON.parse(text);
-    } catch {
-      return null;
-    }
-  } catch (error) {
-    console.error(`[rapid] Network error for path ${path}:`, error);
+    const json = await response.json();
+    return json;
+  } catch (error: any) {
+    console.error(`[RapidEnricher] Network error for video ${videoId}:`, error.message);
     return null;
   }
 }
 
 export async function runRapidWorker() {
-  const fetchedAt = new Date().toISOString();
-  
-  // Ensure output directory exists
-  fs.mkdirSync(resolve(process.cwd(), "output_json"), { recursive: true });
-
-  const stream = fs.createWriteStream(OUTPUT_FILE, { flags: "w" }); // Overwrite or append? I'll overwrite per stage run
-  
-  const maxRequests = Number(process.env.RAPID_MAX_REQUESTS) || 150;
-  const delayMs = Number(process.env.RAPID_DELAY_MS) || 1500;
-  let requestCount = 0;
-
-  for (const config of env.rapidApiConfigs) {
-    let shouldAbortWorker = false;
-    console.log(`[rapid] start ${config.host} regions=${env.crawlRegions.join(",") || "US"} maxRequests=${maxRequests}`);
-    const regions = env.crawlRegions.length > 0 ? env.crawlRegions : ["US"];
-
-    for (const region of regions) {
-      if (requestCount >= maxRequests || shouldAbortWorker) break;
-
-      for (const endpoint of buildRapidEndpointCandidates(region, config.host)) {
-        if (requestCount >= maxRequests) break;
-
-        if (requestCount > 0 && delayMs > 0) {
-          await delay(delayMs);
-        }
-
-        requestCount++;
-        console.log(`[rapid] [req #${requestCount}/${maxRequests}] Fetching ${region} (${endpoint.path})`);
-        
-        let payload = await tryRapidEndpoint(config.host, config.apiKey, endpoint.path, endpoint.params);
-        if (!payload) {
-          console.warn(`[rapid] Retrying 1 time...`);
-          await delay(1000);
-          payload = await tryRapidEndpoint(config.host, config.apiKey, endpoint.path, endpoint.params);
-          if (!payload) {
-            console.error(`[rapid] Retry failed. Aborting worker ${config.host}!`);
-            shouldAbortWorker = true;
-            break;
-          }
-        }
-
-        const outputRecord = {
-          host: config.host,
-          region,
-          endpoint: endpoint.path,
-          fetchedAt,
-          payload
-        };
-
-        stream.write(JSON.stringify(outputRecord) + "\n");
-        console.log(`[rapid] [req #${requestCount}/${maxRequests}] Saved raw payload.`);
-        
-        // Stop after we get one successful payload per region to avoid too many requests?
-        // Original logic: "if (records.length > 0) { break; }"
-        break; 
-      }
-    }
+  if (!existsSync(ID_FILTER_FILE)) {
+    throw new Error(`Input file not found: ${ID_FILTER_FILE}`);
   }
 
-  stream.end();
-  console.log(`[rapid] Done. Raw results saved to ${OUTPUT_FILE}`);
+  const rows = await readJsonLines<any>(ID_FILTER_FILE);
+  const queue = [...rows];
+
+  console.log(`Loaded ${queue.length} queued ids from id_filter.`);
+
+  if (queue.length === 0) {
+    console.log("No ids found to call API for.");
+    return;
+  }
+
+  // Rapid API thường có rate limit gắt gao (đặc biệt bản free), ta nên chạy concurrency = 1 và delay hợp lý
+  const concurrency = process.env.RAPID_CONCURRENCY ? parseInt(process.env.RAPID_CONCURRENCY, 10) : 1;
+  const delayMs = process.env.RAPID_DELAY_MS ? parseInt(process.env.RAPID_DELAY_MS, 10) : 2000;
+  console.log(`Starting RapidAPI enrichment with concurrency ${concurrency} and delay ${delayMs}ms...`);
+
+  let index = 0;
+  let savedCount = 0;
+  let viralSavedCount = 0;
+
+  const worker = async () => {
+    while (index < rows.length) {
+      const item = rows[index++];
+      const id = String(item?.id ?? "").trim();
+      const author = String(item?.author ?? "").trim();
+      if (!id) continue;
+
+      console.log(`[RapidEnricher] Enriching [${index}/${rows.length}] video ID: ${id}`);
+      let payload = await fetchRapidDetail(id);
+
+      // Nếu gặp lỗi (như 429 Too Many Requests), chờ lâu hơn rồi thử lại
+      if (!payload || !payload.aweme_detail) {
+        console.warn(`[RapidEnricher] API failed for ${id}. Waiting 10 seconds before retry to avoid 429...`);
+        await delay(10000);
+        payload = await fetchRapidDetail(id);
+      }
+
+      if (payload && payload.aweme_detail) {
+        const aweme = payload.aweme_detail;
+        const stats = aweme.statistics;
+        const createTime = aweme.create_time ? new Date(aweme.create_time * 1000).toISOString() : new Date().toISOString();
+
+        let sound = "Original sound";
+        if (aweme.music) {
+          const title = aweme.music.title || "";
+          const authorName = aweme.music.author || aweme.music.owner_nickname || "";
+          sound = title && authorName ? `${title} - ${authorName}` : title || authorName || sound;
+        }
+
+        const tags = (aweme.text_extra || [])
+          .map((t: any) => t.hashtag_name ? `#${t.hashtag_name}` : "")
+          .filter(Boolean);
+
+        const record = {
+          id,
+          platform: "TikTok",
+          postDate: createTime,
+          hashtags: tags,
+          views: stats?.play_count ?? 0,
+          likes: stats?.digg_count ?? 0,
+          comments: stats?.comment_count ?? 0,
+          saves: stats?.collect_count ?? 0,
+          shares: stats?.share_count ?? 0,
+          total_view_growth: 0,
+          url: item.url || `https://www.tiktok.com/@${aweme.author?.unique_id || author || "user"}/video/${id}`,
+          fetchedAt: new Date().toISOString(),
+          sound,
+          author: aweme.author?.unique_id || author,
+        };
+
+        appendFileSync(TOTAL_FILE, `${JSON.stringify(record)}\n`, "utf8");
+        savedCount++;
+
+        // Calculate viral metrics and append immediately
+        const postMs = new Date(record.postDate || new Date().toISOString()).getTime();
+        if (Number.isFinite(postMs) && (Date.now() - postMs) / 3_600_000 <= env.maxVideoAgeDays * 24) {
+          const viralRecord = withViralMetrics(record);
+          if (viralRecord.viral_score >= env.viralScoreThreshold) {
+            appendFileSync(VIRAL_FILE, `${JSON.stringify(viralRecord)}\n`, "utf8");
+            viralSavedCount++;
+          }
+        }
+      } else {
+        console.warn(`[RapidEnricher] Enrichment failed for video ID ${id}`);
+      }
+
+      await delay(delayMs);
+    }
+  };
+
+  const pool = Array.from({ length: Math.min(concurrency, rows.length) }, () => worker());
+  await Promise.all(pool);
+
+  console.log(`Wrote ${savedCount} new records to ${TOTAL_FILE}`);
+  console.log(`Wrote ${viralSavedCount} new viral records to ${VIRAL_FILE}`);
+  console.log("Done.");
 }
 
 // Allow running standalone
 if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith("rapid.worker.ts")) {
-  runRapidWorker().catch(console.error);
+  runRapidWorker().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
 }

@@ -1,8 +1,12 @@
 {
-  "name": "viraldash-server",
+  "name": "viraldash",
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
   "scripts": {
     "check": "tsc -p tsconfig.json --noEmit",
 
@@ -35,7 +39,12 @@
     "tiktok:all":           "tsx crawler/tiktok/index.ts",
 
     "migrate:yt-dry":   "tsx crawler/scripts/migrate-yt-data.ts",
-    "migrate:yt-apply": "tsx crawler/scripts/migrate-yt-data.ts --apply"
+    "migrate:yt-apply": "tsx crawler/scripts/migrate-yt-data.ts --apply",
+
+    "frontend:dev":   "npm run dev   --prefix frontend",
+    "frontend:build": "npm run build --prefix frontend",
+    "frontend:start": "npm run start --prefix frontend",
+    "frontend:lint":  "npm run lint  --prefix frontend"
   },
   "engines": {
     "node": ">=18"

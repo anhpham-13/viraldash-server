@@ -2,46 +2,67 @@
 
 ## Overview
 
-The `crawler/tiktok/` module is the TikTok data-collection layer. It discovers TikTok video IDs from two independent sources, enriches each video with full engagement metrics, applies the shared viral scoring formula, and writes production data to `data/tiktok/` for consumption by the backend API.
+The `crawler/tiktok/` module is the TikTok data-collection layer of the ViralDash backend. It discovers TikTok video IDs from two independent sources — a REST API (Serper.dev) and a headless browser matrix scraper (Playwright + Google Advanced Search) — then enriches each discovered ID with full engagement metrics through either a Playwright page scraper or a direct RapidAPI call. A shared viral scoring formula filters final output before the backend API consumes it.
 
-The architecture is split into **two independent pipelines** that run in parallel and write to separate output trees. Only Pipeline 1 feeds the live backend.
+The module intentionally provides **interchangeable components** at both the discovery and enrichment layers: operators can swap strategies based on quota availability, IP reputation, and cost constraints without changing downstream consumers.
 
 ---
 
 ## Architecture
 
-### Pipeline 1 — Serper + Playwright *(production, feeds backend API)*
+### Production Data Flow
 
 ```
-google.worker  ──[Serper API + Google Video Search]──▶  data/tiktok/raw_google_output_tt.jsonl
-                                                                   │
-                                              filter-google-ids-tt  (dedup against total + queue)
-                                                                   │
-                                                    data/tiktok/id_filter_tt.jsonl
-                                                                   │
-                                 process-id-filter-to-total-tt  (Playwright page scrape)
-                                                    │                          │
-                              data/tiktok/total_vids_tt.jsonl    data/tiktok/viral_vids_tt.jsonl
-                                                                         ▲
-                                                               ┌──────────┘
-                                                        Backend API reads here
+Discovery Layer (choose one or both — both write to same raw output file)
+│
+├── google.worker.ts          REST API (Serper.dev → Google Video Search)
+│                             No browser. Fast. API-quota limited.
+│
+└── gg-advanced-search-scraper.ts   Playwright + nocaptchaai extension
+                              Browser-based. No API quota. CAPTCHA-tolerant.
+                              Matrix of `site:tiktok.com/` queries via Google.
+                              │
+                              ▼
+             data/tiktok/raw_google_output_tt.jsonl   { id, url, fetchedAt }
+                              │
+                     filter-google-ids-tt.ts
+                     (dedup against total store + current queue)
+                              │
+                              ▼
+             data/tiktok/id_filter_tt.jsonl   { id, url, author }
+                              │
+Enrichment Layer (choose one — both consume id_filter, write to same outputs)
+│
+├── process-id-filter-to-total-tt.ts    Playwright stealth browser scraping
+│                                       Free. Requires browser binary.
+│
+└── rapid.worker.ts                     RapidAPI per-video lookup
+                                        Paid API. No browser. Faster.
+                                        Endpoint: /v1/post/{videoId}?region={region}
+                              │
+                              ▼
+             data/tiktok/total_vids_tt.jsonl   (append-only, enriched records)
+             data/tiktok/viral_vids_tt.jsonl   (append-only, viral threshold filter)
+                              ▲
+                    Backend API reads here
 ```
 
-### Pipeline 2 — RapidAPI *(experimental, output_json/)*
+### Experimental Pipeline 2 (output_json/ tree)
 
 ```
-rapid.worker  ──[RapidAPI trending endpoints]──▶  output_json/tiktok_rapid_raw.jsonl
-                                                             │
-                                            normalize  (cross-source parser + dedup)
-                                                             │
-                                             output_json/tiktok_candidates.jsonl
-                                                             │
-                                             aggregator  (viral scoring)
-                                                             │
-                                              output_json/tiktok_viral_tt.jsonl
+rapid.worker (legacy role) ──▶  output_json/tiktok_rapid_raw.jsonl
+google.worker (legacy role) ──▶  output_json/tiktok_google_raw.jsonl
+                    │
+              normalize.ts  (cross-source parser + dedup)
+                    │
+              output_json/tiktok_candidates.jsonl
+                    │
+              aggregator.ts  (viral score filter)
+                    │
+              output_json/tiktok_viral_tt.jsonl
 ```
 
-> **Note:** `index.ts` orchestrates all four stages (RapidWorker → GoogleWorker → Normalize → Aggregator) as a combined experimental run. For production data collection that feeds the dashboard, run **Pipeline 1 steps individually** using the npm scripts documented below.
+> `index.ts` orchestrates this experimental four-stage sequence. It does **not** feed the live backend. For production data collection, run the Pipeline 1 steps individually via `npm run tiktok:*` scripts.
 
 ---
 
@@ -49,105 +70,127 @@ rapid.worker  ──[RapidAPI trending endpoints]──▶  output_json/tiktok_r
 
 ```
 crawler/tiktok/
-├── index.ts                           Full pipeline orchestrator (experimental)
+│
+├── index.ts                             Experimental pipeline orchestrator
+│
 ├── config/
-│   └── env.ts                         TikTok-specific environment variable loader
+│   └── env.ts                           TikTok-specific env variable loader + types
+│
 ├── workers/
-│   └── source.types.ts                IWorkerCollector<T> interface (future extension point)
+│   └── source.types.ts                  IWorkerCollector<T> interface (future extension)
 │
-│── Pipeline 1 (production)
-├── google.worker.ts                   Serper API Google search → TikTok video seeds
-├── filter-google-ids-tt.ts            Deduplicates raw seeds → pending enrichment queue
-├── process-id-filter-to-total-tt.ts   Playwright enrichment + viral scoring
+│   ── Discovery ──
+├── google.worker.ts                     Serper API → Google Video Search → TikTok seeds
+├── gg-advanced-search-scraper.ts        Playwright browser → Google site: matrix scraper
 │
-│── Pipeline 2 (experimental / RapidAPI)
-├── rapid.worker.ts                    RapidAPI trending feed fetcher
-├── normalize.ts                       Cross-source payload normalizer
-└── aggregator.ts                      Viral score filter and final output writer
+│   ── Deduplication ──
+├── filter-google-ids-tt.ts              Raw seed dedup → pending enrichment queue
+│
+│   ── Enrichment ──
+├── process-id-filter-to-total-tt.ts     Playwright stealth → TikTok page scraper
+├── rapid.worker.ts                      RapidAPI /v1/post/{id} → per-video enricher
+│
+│   ── Experimental normalization pipeline ──
+├── normalize.ts                         Cross-source payload normalizer
+└── aggregator.ts                        Viral score filter + final output writer
 ```
 
 ---
 
 ## Environment Variables
 
-Set all variables in `.env` at the **project root**.
+Place all variables in `.env` at the **project root**.
 
-### Pipeline 1 — Serper + Playwright
+### Discovery — Serper API (`google.worker.ts`)
 
 | Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
+|---|---|---|---|
 | `SERPER_API_KEYS` | Yes | — | Comma-separated Serper.dev API keys. Rotated round-robin per request. |
-| `SERPER_API_KEY` | Fallback | — | Single Serper key (used if `SERPER_API_KEYS` is not set). |
-| `CRAWL_REGION` | No | `us` | ISO country code passed to Serper `gl` param. |
-| `CRAWL_LANG` | No | `en` | Language code passed to Serper `hl` param. |
-| `SERPER_NUM` | No | `100` | Results per page from Serper. |
+| `SERPER_API_KEY` | Fallback | — | Single Serper key (used if `SERPER_API_KEYS` is absent). |
+| `CRAWL_REGION` | No | `us` | ISO country code for Serper `gl` param. |
+| `CRAWL_LANG` | No | `en` | Language code for Serper `hl` param. |
+| `SERPER_NUM` | No | `100` | Results returned per Serper page. |
 | `SERPER_MAX_PAGES` | No | `2` | Pages fetched per query. |
-| `SERPER_DELAY_MS` | No | `500` | Millisecond delay between Serper API calls. |
-| `ENRICHER_CONCURRENCY` | No | `5` | Number of parallel Playwright browser workers for video enrichment. |
-| `MAX_VIDEO_AGE_DAYS` | No | `1` | Videos older than this are excluded from `viral_vids_tt.jsonl`. |
-| `VIRAL_SCORE_THRESHOLD` | No | `98` | Minimum viral score (0–100) to write to `viral_vids_tt.jsonl`. |
+| `SERPER_DELAY_MS` | No | `500` | Milliseconds between Serper requests. |
 
-### Pipeline 2 — RapidAPI
+### Enrichment — Playwright scraper (`process-id-filter-to-total-tt.ts`)
 
 | Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `RAPID_API_HOST` | Yes | — | RapidAPI endpoint host (e.g. `tiktok-scraper7.p.rapidapi.com`). |
-| `RAPID_API_KEYS` | Yes | — | Comma-separated RapidAPI keys. One key = one `RapidApiConfig` entry. |
-| `CRAWL_REGIONS` | No | `US` | Comma-separated ISO region codes to crawl (e.g. `US,GB,AU`). |
-| `RAPID_MAX_REQUESTS` | No | `150` | Hard cap on total API requests across all regions per run. |
-| `RAPID_DELAY_MS` | No | `1500` | Milliseconds to wait between each RapidAPI request. |
-| `VIRAL_SCORE_THRESHOLD` | No | `90` | Minimum viral score for aggregator output (TikTok uses 90, not 98). |
-| `MAX_BROWSER_CONCURRENCY` | No | `3` | Loaded by `config/env.ts` — available for future Playwright pooling. |
+|---|---|---|---|
+| `ENRICHER_CONCURRENCY` | No | `5` | Parallel Playwright browser workers. |
+| `MAX_VIDEO_AGE_DAYS` | No | `1` | Videos older than this value (in days) are excluded from `viral_vids_tt.jsonl`. |
+| `VIRAL_SCORE_THRESHOLD` | No | `98` | Minimum viral score to write to `viral_vids_tt.jsonl`. |
+
+### Enrichment — RapidAPI (`rapid.worker.ts`)
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `RAPID_API_HOST` | Yes | — | RapidAPI endpoint host (e.g. `tokapi-mobile-version.p.rapidapi.com`). |
+| `RAPID_API_KEYS` | Yes | — | Comma-separated RapidAPI keys. |
+| `CRAWL_REGIONS` | No | `US` | Comma-separated ISO region codes for the `region` query param. |
+| `RAPID_CONCURRENCY` | No | `1` | Parallel fetch workers (keep low — RapidAPI enforces rate limits). |
+| `RAPID_DELAY_MS` | No | `2000` | Milliseconds between each RapidAPI request per worker. |
+| `MAX_VIDEO_AGE_DAYS` | No | `1` | Same age filter as Playwright enricher. |
+| `VIRAL_SCORE_THRESHOLD` | No | `98` | Same viral score gate as Playwright enricher. |
+
+### Utility Scripts (`aggregator.ts`)
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `VIRAL_SCORE_THRESHOLD` | No | `90` | Aggregator uses 90 as its hard fallback if not set. |
+| `MAX_BROWSER_CONCURRENCY` | No | `3` | Loaded by `config/env.ts`; reserved for future Playwright pooling. |
 
 ---
 
 ## Data Files
 
-All paths are relative to the **project root**.
+All paths relative to the **project root**.
 
-### Pipeline 1 (production)
-
-| File | Written by | Read by | Description |
-|------|-----------|---------|-------------|
-| `data/tiktok/raw_google_output_tt.jsonl` | `google.worker` | `filter-google-ids-tt` | Raw TikTok video seeds: `{ id, url, fetchedAt }`. Overwritten each run. |
-| `data/tiktok/id_filter_tt.jsonl` | `filter-google-ids-tt` | `process-id-filter-to-total-tt` | Deduped pending enrichment queue: `{ id, url, author }`. Shrinks as videos are processed. |
-| `data/tiktok/total_vids_tt.jsonl` | `process-id-filter-to-total-tt` | `filter-google-ids-tt`, backend | Append-only store of all Playwright-enriched TikTok records. |
-| `data/tiktok/viral_vids_tt.jsonl` | `process-id-filter-to-total-tt` | **Backend API** | Filtered viral videos — append-only, written per enriched video that passes threshold. |
-
-### Pipeline 2 (experimental)
+### Pipeline 1 — Production
 
 | File | Written by | Read by | Description |
-|------|-----------|---------|-------------|
-| `output_json/tiktok_rapid_raw.jsonl` | `rapid.worker` | `normalize` | Raw RapidAPI response envelopes: `{ host, region, endpoint, fetchedAt, payload }`. Overwritten per run. |
-| `output_json/tiktok_google_raw.jsonl` | *(google.worker legacy)* | `normalize` | Raw Google seed records for the experimental pipeline. |
-| `output_json/tiktok_candidates.jsonl` | `normalize` | `aggregator` | Normalized `IVideoRecordCandidate` records, cross-source deduplicated. |
-| `output_json/tiktok_viral_tt.jsonl` | `aggregator` | — | Final viral output from the RapidAPI pipeline. Not consumed by the backend API. |
+|---|---|---|---|
+| `data/tiktok/raw_google_output_tt.jsonl` | `google.worker`, `gg-advanced-search-scraper` | `filter-google-ids-tt` | Raw seeds: `{ id, url, fetchedAt }`. Overwritten at each discovery run. |
+| `data/tiktok/id_filter_tt.jsonl` | `filter-google-ids-tt` | `process-id-filter-to-total-tt`, `rapid.worker` | Pending enrichment queue: `{ id, url, author }`. Re-calculated per filter run. |
+| `data/tiktok/total_vids_tt.jsonl` | `process-id-filter-to-total-tt`, `rapid.worker` | `filter-google-ids-tt`, backend | Append-only store of all enriched TikTok records. |
+| `data/tiktok/viral_vids_tt.jsonl` | `process-id-filter-to-total-tt`, `rapid.worker` | **Backend API** | Append-only viral video records. Directly consumed by dashboard. |
+
+### Pipeline 2 — Experimental
+
+| File | Written by | Read by | Description |
+|---|---|---|---|
+| `output_json/tiktok_rapid_raw.jsonl` | `rapid.worker` (legacy) | `normalize` | Raw RapidAPI envelopes. Deprecated as rapid.worker is now in Pipeline 1. |
+| `output_json/tiktok_google_raw.jsonl` | `google.worker` (legacy) | `normalize` | Raw Google seed records for the experimental path. |
+| `output_json/tiktok_candidates.jsonl` | `normalize` | `aggregator` (legacy) | Normalized `IVideoRecordCandidate` records, cross-source deduplicated. |
+| `data/tiktok/viral_vids_tt.jsonl` | `aggregator` | — | Final viral output. Aggregator now acts as a recalculator for total_vids_tt. |
 
 ---
 
 ## Component Reference
 
-### `google.worker.ts` — Serper API Discovery
+---
 
-**Technical approach:** REST API (Serper.dev — Google Video Search proxy). No browser automation. Pure HTTPS calls using Node.js `node:https`.
+### `google.worker.ts` — Serper API Discovery Worker
 
-**Purpose:** Builds a large, intent-diversified query pool and searches Google's video index for TikTok URLs published in the last 24 hours. Extracts and deduplicates canonical TikTok video seeds.
+**Technical approach:** Pure REST API calls via Node.js `node:https`. No browser automation.
 
-**Query strategy:** Combines 8 intent phrases × (6 freshness signals + 30 categories + 14 US geo signals + 26 alphabet chars + 6 numbers) plus 11 hashtag variants × 4 templates, producing **thousands of unique queries** that saturate the Google video index across topics, locales, and temporal signals. All queries include `tbs=qdr:d` (last 24 hours filter).
+**Target data:** Canonical TikTok video URLs indexed by Google's video search in the last 24 hours. Produces ID + URL seeds only — no engagement metrics.
 
-**ID extraction:** `VIDEO_URL_RE` = `tiktok.com/@(author)/video/(id)` — only canonical video URLs are accepted; profile pages and music URLs are discarded.
+**Query strategy:** Dynamically builds a diversified query pool from 8 intent phrases cross-combined with 6 freshness signals, 30 content categories, 14 US geo signals, 26 alphabet characters, and 6 numbers, plus 11 hashtag variants across 4 templates. All queries include `tbs=qdr:d` (last 24 hours). The pool deduplicated via `Set` typically yields hundreds of unique queries per run.
+
+**ID extraction:** Regex `tiktok.com/@(author)/video/(id)` — only canonical video page URLs are accepted. Profile pages, music URLs, and redirects are discarded.
 
 **Key behaviour:**
-- Rotates through `SERPER_API_KEYS` round-robin (one key consumed per page)
-- Deduplicates IDs in-memory via a `Set<string>` before writing
-- Appends results immediately to disk — safe to interrupt and restart
-- Output is overwritten fresh each run (`fs.writeFileSync(OUTPUT_FILE, "")` at start)
+- Rotates through `SERPER_API_KEYS` round-robin (one key slot consumed per page request)
+- In-memory `Set<string>` deduplicates IDs before writing to disk
+- Output file overwritten fresh at run start — each execution produces a clean snapshot
+- Safe to interrupt; restart re-generates from scratch
 
 **Inputs:**
 - `SERPER_API_KEYS` (required)
 - `CRAWL_REGION`, `CRAWL_LANG`, `SERPER_NUM`, `SERPER_MAX_PAGES`, `SERPER_DELAY_MS`
 
-**Outputs:** `data/tiktok/raw_google_output_tt.jsonl` — records shaped as `{ id, url, fetchedAt }`
+**Output:** `data/tiktok/raw_google_output_tt.jsonl` — records: `{ id, url, fetchedAt }`
 
 **Run:**
 ```bash
@@ -156,23 +199,66 @@ npm run tiktok:google
 
 ---
 
-### `filter-google-ids-tt.ts` — ID Deduplicator
+### `gg-advanced-search-scraper.ts` — Playwright Browser Matrix Scraper
+
+**Technical approach:** Headed Chromium browser automation via Playwright with the bundled `nocaptchaai-extension` loaded. Scrapes Google Search SERPs directly. No API quota consumed.
+
+**Target data:** Same as `google.worker.ts` — canonical TikTok video URLs from Google — but via a browser rather than an API. Provides an API-quota-free fallback and a broader index surface using Google Advanced Search operators.
+
+**Query matrix:** Generates `site:tiktok.com/` queries using a 26 × 36 character grid (lowercase a–z × a–z + 0–9), each expressed in three operator forms:
+```
+site:tiktok.com/ "ab"
+site:tiktok.com/ ab
+site:tiktok.com/ intitle:"ab"
+```
+This produces approximately **2,808 unique queries** that systematically force Google to surface TikTok video pages across all textual namespaces. Queries are shuffled randomly before dispatch to avoid detectable sequential patterns. All searches include `&tbs=qdr:d` (24-hour recency filter) and `&num=100` (maximum results per SERP).
+
+**Concurrency model:** Splits the full query list evenly across `CONCURRENCY = 5` parallel Playwright browser workers. Each worker owns an isolated persistent browser profile (`data/user_data_worker_{n}/`) to prevent cookie and session cross-contamination. The `nocaptchaai-extension` is loaded into every browser context via `--load-extension` and `--disable-extensions-except` launch flags.
+
+**CAPTCHA handling:** Google's `/sorry` challenge page is detected by URL pattern. The worker pauses and waits up to 45 seconds for the extension to resolve the challenge automatically before continuing.
+
+**ID extraction:** DOM evaluation via `page.evaluate()` queries all `<a>` elements, filters hrefs containing `tiktok.com/` and `/video/`, then applies the same `\/video\/([0-9]+)` regex as the API worker.
+
+**Key behaviour:**
+- Requires `headless: false` — the nocaptchaai extension must render to interact with CAPTCHAs
+- Pre-loads existing IDs from `total_vids_tt.jsonl` and the legacy `total_video.jsonl` to skip already-enriched videos
+- Appends new records immediately to `raw_google_output_tt.jsonl` (shared with `google.worker`)
+- 2-second wait between queries per worker to avoid behaviour pattern detection
+
+**Inputs:**
+- `crawler/extensions/nocaptchaai-extension/` (bundled, no config needed)
+- `data/tiktok/total_vids_tt.jsonl` (read for pre-seed dedup, optional)
+
+**Output:** `data/tiktok/raw_google_output_tt.jsonl` — same schema as `google.worker`: `{ id, url, fetchedAt }`
+
+**Run:**
+```bash
+npm run tiktok:google-browser
+# (or invoke directly)
+npx tsx crawler/tiktok/gg-advanced-search-scraper.ts
+```
+
+> **Note:** This script calls `runSearchPipeline()` at module load — it executes immediately when invoked via `tsx`. It does not have a dedicated `package.json` script entry yet; add one under `tiktok:google-browser` if needed.
+
+---
+
+### `filter-google-ids-tt.ts` — ID Deduplicator / Queue Builder
 
 **Technical approach:** File I/O only. No network calls.
 
-**Purpose:** Filters raw seeds against two existing ID sets — `total_vids_tt.jsonl` (already enriched) and `id_filter_tt.jsonl` (already queued) — and produces a clean pending-enrichment queue.
+**Purpose:** Merges the raw discovery output against two existing ID sets — `total_vids_tt.jsonl` (already enriched) and the current `id_filter_tt.jsonl` queue (already pending) — and produces a clean, non-redundant queue for the enrichment workers.
 
 **Key behaviour:**
-- Checks `row?.data?.id ?? row?.id` to handle both wrapped (`{ data: { id } }`) and flat (`{ id }`) input shapes
-- Preserves queue rows that exist in `id_filter_tt.jsonl` but not yet in `total_vids_tt.jsonl` (prevents losing the queue on re-run)
-- Output shape: `{ id, url, author }` — `author` is required by the Playwright enricher to construct the video URL
+- Accepts both wrapped (`{ data: { id } }`) and flat (`{ id }`) row shapes from the raw file to handle both `google.worker` and legacy outputs
+- Preserves queue rows already in `id_filter_tt.jsonl` that are not yet in `total_vids_tt.jsonl` — re-running filter does not lose the in-progress queue
+- Output shape: `{ id, url, author }` — `author` is required by the Playwright enricher to construct the TikTok page URL
 
 **Inputs:**
-- `data/tiktok/raw_google_output_tt.jsonl`
-- `data/tiktok/total_vids_tt.jsonl` (existence optional)
-- `data/tiktok/id_filter_tt.jsonl` (existence optional)
+- `data/tiktok/raw_google_output_tt.jsonl` (required)
+- `data/tiktok/total_vids_tt.jsonl` (read for dedup, optional)
+- `data/tiktok/id_filter_tt.jsonl` (read to preserve queue, optional)
 
-**Outputs:** `data/tiktok/id_filter_tt.jsonl` (overwritten with merged deduplicated queue)
+**Output:** `data/tiktok/id_filter_tt.jsonl` — overwritten with the merged deduplicated queue
 
 **Run:**
 ```bash
@@ -183,30 +269,38 @@ npm run tiktok:filter-id
 
 ### `process-id-filter-to-total-tt.ts` — Playwright Video Enricher
 
-**Technical approach:** Headless Chromium browser automation via `playwright-extra` + `puppeteer-extra-plugin-stealth`. Dual-strategy data extraction:
-1. **Network interception (primary):** Registers a `page.on("response")` listener that captures TikTok's internal `/api/item/detail` and `/api/video/detail` XHR responses. These return the full `itemStruct` JSON — the most reliable, schema-stable data source.
-2. **DOM scraping (fallback):** If no network intercept fires, parses the hydration blobs in `#__NEXT_DATA__` and `#__UNIVERSAL_DATA_FOR_REHYDRATION__` script tags which embed the full item data as serialized JSON within the initial HTML.
+**Technical approach:** Headless Chromium browser automation via `playwright-extra` + `puppeteer-extra-plugin-stealth`. Two-strategy data extraction:
 
-**Purpose:** For each video ID in the queue, opens the TikTok video page in a dedicated browser context, captures real-time engagement metrics (`diggCount`, `playCount`, `commentCount`, `shareCount`, `collectCount`), extracts `createTime`, `music`, `challenges` (hashtags), and immediately writes the enriched record and its viral score to the output files.
+1. **Network interception (primary):** `page.on("response")` captures TikTok's internal XHR responses to `/api/item/detail` and `/api/video/detail`. These endpoints return a complete `itemStruct` JSON object — schema-stable and the most reliable data source. Fires before the page finishes rendering.
 
-**Concurrency model:** Spawns `ENRICHER_CONCURRENCY` (default 5) async workers sharing a single ordered queue via a shared `index` counter. Each worker owns its full browser lifecycle (launch → context → page → close) — no shared browser state.
+2. **DOM scraping (fallback):** If no network XHR fires within the page load window, the worker parses the server-side hydration blobs embedded in the page HTML:
+   ```
+   #__NEXT_DATA__                        → props.pageProps.itemInfo.itemStruct
+   #__NEXT_DATA__                        → props.pageProps.videoData.itemInfo.itemStruct
+   #__UNIVERSAL_DATA_FOR_REHYDRATION__   → __DEFAULT_SCOPE__["webapp.video-detail"].itemInfo.itemStruct
+   ```
+
+**Target data:** For each queued video ID: `diggCount` (likes), `playCount` (views), `commentCount`, `shareCount`, `collectCount` (saves), `createTime`, `music` (sound attribution), `challenges` (hashtag list), and `author.uniqueId`.
+
+**Concurrency model:** `ENRICHER_CONCURRENCY` (default 5) async workers share a single ordered queue via a shared `index` counter. Each worker owns its full browser lifecycle per video (launch → context → page → close) — no shared browser process or session state.
+
+**Viral scoring:** Inline, immediately after enrichment. A record is appended to `viral_vids_tt.jsonl` only if `age_hours ≤ MAX_VIDEO_AGE_DAYS × 24` AND `viral_score ≥ VIRAL_SCORE_THRESHOLD`. Uses the shared `withViralMetrics()` from `crawler/src/core/viral.calc.ts`.
 
 **Key behaviour:**
-- Each browser context is configured with stealth plugin + a realistic Windows Chrome user agent + `en-US` locale
-- `--disable-blink-features=AutomationControlled` suppresses the most common automation detection flag
-- Retries each video **once** after a 2-second pause on failure
-- Adds a randomized human delay (`1,000–3,000 ms`) between requests per worker
-- Writes directly to `total_vids_tt.jsonl` and `viral_vids_tt.jsonl` via `appendFileSync` — **does NOT require a prior dedup pass**; new records are simply appended
-- Viral scoring and age filtering happen inline: a record is written to `viral_vids_tt.jsonl` only if `age_hours ≤ MAX_VIDEO_AGE_DAYS * 24` AND `viral_score ≥ VIRAL_SCORE_THRESHOLD`
-- Does **not** clean up `id_filter_tt.jsonl` after processing — re-runs will skip already-enriched IDs via `filter-google-ids-tt`
+- `puppeteer-extra-plugin-stealth` patches all known `navigator.webdriver` exposure points
+- `--disable-blink-features=AutomationControlled` suppresses Chrome's automation flag
+- Windows 10 Chrome/124 user agent + `en-US` locale + `1280×720` viewport
+- Retries each video once after a 2-second pause on failure
+- Randomized per-worker inter-request delay: `1,000–3,000 ms`
+- Writes directly via `appendFileSync` — safe to interrupt and resume
 
 **Inputs:**
-- `data/tiktok/id_filter_tt.jsonl`
+- `data/tiktok/id_filter_tt.jsonl` (required)
 - `ENRICHER_CONCURRENCY`, `MAX_VIDEO_AGE_DAYS`, `VIRAL_SCORE_THRESHOLD`
 
 **Outputs:**
 - `data/tiktok/total_vids_tt.jsonl` (append)
-- `data/tiktok/viral_vids_tt.jsonl` (append, directly consumed by backend API)
+- `data/tiktok/viral_vids_tt.jsonl` (append — consumed by backend API)
 
 **Run:**
 ```bash
@@ -215,30 +309,40 @@ npm run tiktok:process-total
 
 ---
 
-### `rapid.worker.ts` — RapidAPI Trending Feed Fetcher
+### `rapid.worker.ts` — RapidAPI Per-Video Enricher
 
-**Technical approach:** Direct REST API calls via native `fetch`. No browser. Adaptive endpoint discovery.
+**Technical approach:** Direct REST API calls via native `fetch`. No browser. Reads the same `id_filter_tt.jsonl` queue as the Playwright enricher and writes to the same output files — it is a **drop-in API-based alternative** to `process-id-filter-to-total-tt.ts`.
 
-**Purpose:** Queries RapidAPI-hosted TikTok scraper services to retrieve trending video data by region. Because RapidAPI hosts multiple TikTok scraper services with different route schemas, the worker tries multiple endpoint paths per region and uses the first that succeeds.
+**API endpoint:** `https://tokapi-mobile-version.p.rapidapi.com/v1/post/{videoId}?region={region}`
 
-**Endpoint strategy:** Detects the API host at runtime:
-- If `host.includes("scraper7")`: uses Scraper7-specific paths (`/feed/search`, `/feed`, `/trending`)
-- Otherwise: tries 8 generic paths (`/trending/{region}`, `/trending`, `/feed/trending`, `/search`, etc.)
+**Target data:** `aweme_detail` object from the response: `statistics` (play/digg/comment/share/collect counts), `create_time`, `music` (title + author/owner_nickname), `text_extra[].hashtag_name` (hashtags), `author.unique_id`.
+
+**Concurrency model:** `RAPID_CONCURRENCY` (default 2) async workers sharing a shared index counter — deliberately low to respect RapidAPI rate limits.
+
+**Viral scoring:** Identical inline logic to `process-id-filter-to-total-tt.ts` — records passing the age and viral score thresholds are immediately appended to `viral_vids_tt.jsonl`.
 
 **Key behaviour:**
-- Iterates over all `RAPID_API_KEYS` (each key is a separate `RapidApiConfig`)
-- For each config: iterates over regions, tries endpoint candidates in order, writes the **first successful payload** per region and moves on (`break` after first success)
-- On any failure: retries once after 1,000 ms, then aborts the entire worker for that API config
-- Writes raw response envelopes: `{ host, region, endpoint, fetchedAt, payload }` — preserves the full response for parsing flexibility in `normalize.ts`
-- `RAPID_MAX_REQUESTS` acts as a hard safety cap across all regions and configs
+- Uses the first key from `rapidApiConfigs` (loaded from `RAPID_API_HOST` + `RAPID_API_KEYS` via `config/env.ts`)
+- `CRAWL_REGIONS[0]` (default `US`) is passed as the `region` query parameter
+- Retries each video once after a 2-second pause on `null` or missing `aweme_detail`
+- `RAPID_DELAY_MS` (default 1,000 ms) applied after each video regardless of success
+- Logs progress as `[RapidEnricher] Enriching [n/total] video ID: {id}`
+
+**When to prefer over Playwright enricher:**
+- IP is rate-limited or flagged by TikTok
+- Browser binary unavailable in the deployment environment
+- Faster throughput needed (no browser launch overhead per video)
 
 **Inputs:**
+- `data/tiktok/id_filter_tt.jsonl` (required)
 - `RAPID_API_HOST`, `RAPID_API_KEYS`, `CRAWL_REGIONS`
-- `RAPID_MAX_REQUESTS` (default 150), `RAPID_DELAY_MS` (default 1,500 ms)
+- `RAPID_CONCURRENCY`, `RAPID_DELAY_MS`, `MAX_VIDEO_AGE_DAYS`, `VIRAL_SCORE_THRESHOLD`
 
-**Outputs:** `output_json/tiktok_rapid_raw.jsonl` (overwritten per run)
+**Outputs:**
+- `data/tiktok/total_vids_tt.jsonl` (append)
+- `data/tiktok/viral_vids_tt.jsonl` (append — consumed by backend API)
 
-**Run standalone:**
+**Run:**
 ```bash
 npm run tiktok:rapid
 ```
@@ -247,72 +351,71 @@ npm run tiktok:rapid
 
 ### `normalize.ts` — Cross-Source Payload Normalizer
 
-**Technical approach:** Streaming file I/O (`readline` interface). No network calls. Contains two format-specific parsers.
+**Technical approach:** Streaming file I/O via Node.js `readline`. No network calls. Contains two format-specific parsers for the experimental pipeline's raw files.
 
-**Purpose:** Reads raw payloads from both the RapidAPI and Google discovery workers, runs format-specific parsing logic, cross-deduplicates by video ID, and produces a uniform `IVideoRecordCandidate` stream.
+**Purpose:** Reads raw payloads from `tiktok_rapid_raw.jsonl` and `tiktok_google_raw.jsonl`, parses them through host-specific logic, cross-deduplicates by video ID, and writes a uniform `IVideoRecordCandidate` stream.
 
 **Parser 1 — `collectFromRapidPayload`** (standard RapidAPI format):
-- Navigates `root.data / root.result / root.response / root` to find the video list (`list / items / data / item_list`)
+- Traverses `root.data / root.result / root.response / root` to find the video list (`list / items / data / item_list`)
 - Extracts IDs from `aweme_id / id / video_id`
 - Maps engagement from `statistics.play_count / digg_count / comment_count / share_count / collect_count`
-- Extracts hashtags from 4 locations: `desc`, `original_client_text.markup_text`, `text_extra[type=1].hashtag_name`, `cha_list[].cha_name`
-- Reconstructs music string from `music.title + music.author`
+- Hashtag extraction from 4 locations: `desc`, `original_client_text.markup_text`, `text_extra[type=1].hashtag_name`, `cha_list[].cha_name`
+- Music from `music.title + music.author / owner_nickname / owner_handle`
 - Converts `create_time` (Unix seconds) to ISO 8601
 
 **Parser 2 — `collectFromScraper7Payload`** (Scraper7 host format):
 - Navigates `payload.data.videos[]`
 - Maps `play_count`, `digg_count`, `comment_count`, `share_count`, `collect_count` directly
-- Extracts hashtags from video `title` field only
-- Handles `music_info.title + music_info.author`
+- Hashtags extracted from `title` field only
+- Music from `music_info.title + music_info.author`
 
-**Number normalization (`normalizeNumber`):** Handles abbreviated strings — `"1.2K"` → 1200, `"3.5M"` → 3,500,000, `"2B"` → 2,000,000,000.
+**`normalizeNumber`:** Handles abbreviated strings — `"1.2K"` → 1,200; `"3.5M"` → 3,500,000; `"2B"` → 2,000,000,000.
 
-**Date normalization (`toIsoDate`):** Handles Unix seconds (< 1,000,000,000,000), Unix milliseconds (≥ that), and ISO string inputs. Falls back to `fetchedAt`.
-
-**Deduplication:** Single in-memory `Set<string>` covers both input files — a video ID seen in the Rapid file will be skipped when the Google file is processed.
+**`toIsoDate`:** Handles Unix seconds (< 1,000,000,000,000), Unix milliseconds, and ISO string inputs. Falls back to `fetchedAt`.
 
 **Inputs:**
 - `output_json/tiktok_rapid_raw.jsonl`
 - `output_json/tiktok_google_raw.jsonl`
 
-**Outputs:** `output_json/tiktok_candidates.jsonl` (overwritten per run)
+**Output:** `output_json/tiktok_candidates.jsonl` (overwritten per run)
 
-**Run standalone:**
+**Run:**
 ```bash
 npm run tiktok:normalize
 ```
 
 ---
 
-### `aggregator.ts` — Viral Score Filter
+### `aggregator.ts` — Viral Score Recalculator
 
-**Technical approach:** Streaming file I/O. Uses shared `withViralMetrics()` from `crawler/src/core/viral.calc.ts`.
+**Technical approach:** Streaming file I/O. Applies the shared `withViralMetrics()` formula from `crawler/src/core/viral.calc.ts`.
 
-**Purpose:** Final stage of Pipeline 2. Reads normalized candidates, applies the full PRD viral metrics formula (engagement rate, viral velocity, viral score), and writes only videos that exceed `VIRAL_SCORE_THRESHOLD`.
+**Purpose:** A utility to re-evaluate the enriched video database. Reads all records from `total_vids_tt.jsonl`, re-applies the age filter (`MAX_VIDEO_AGE_DAYS`) and computes the viral score. Overwrites `viral_vids_tt.jsonl` with records that meet `VIRAL_SCORE_THRESHOLD`. Useful if you change the scoring formula or threshold and want to retroactively apply it to existing data.
 
 **Key behaviour:**
-- Uses `VIRAL_SCORE_THRESHOLD` from `config/env.ts` with a hard fallback of **90** (lower than the YouTube pipeline's 98 — TikTok's distribution is broader)
+- Hard fallback threshold: **90**
 - Streams input and writes output simultaneously — memory-efficient for large candidate sets
-- Does not apply an age filter — age gating is handled upstream or by the consumer
+- Evaluates `postDate` against the current time. Videos older than `MAX_VIDEO_AGE_DAYS` are excluded.
 
 **Inputs:**
-- `output_json/tiktok_candidates.jsonl`
+- `data/tiktok/total_vids_tt.jsonl`
 - `VIRAL_SCORE_THRESHOLD`
+- `MAX_VIDEO_AGE_DAYS`
 
-**Outputs:** `output_json/tiktok_viral_tt.jsonl` (overwritten per run)
+**Output:** `data/tiktok/viral_vids_tt.jsonl` (overwritten per run)
 
-**Run standalone:**
+**Run:**
 ```bash
-npm run tiktok:aggregate
+npx tsx crawler/tiktok/aggregator.ts
 ```
 
 ---
 
-### `index.ts` — Full Pipeline Orchestrator
+### `index.ts` — Experimental Pipeline Orchestrator
 
-**Purpose:** Runs all four Pipeline 2 stages in sequence for a single end-to-end experimental run: `runRapidWorker → runGoogleWorker → runNormalize → runAggregator`.
+**Purpose:** Runs RapidWorker → GoogleWorker → Normalize → Aggregator as a single sequential end-to-end experimental run via the `output_json/` tree.
 
-> **Production note:** This orchestrator targets the `output_json/` pipeline. For data that reaches the backend dashboard, run Pipeline 1 steps individually.
+> **Production note:** This orchestrator targets the experimental `output_json/` pipeline and does **not** feed the backend dashboard. For live data, run the Pipeline 1 steps individually.
 
 **Run:**
 ```bash
@@ -323,11 +426,12 @@ npm run tiktok:all
 
 ### `config/env.ts` — TikTok Environment Loader
 
-**Purpose:** Parses and validates TikTok-specific environment variables independently from the shared `crawler/src/config/env.ts`. Produces a typed `TiktokAppEnv` object consumed by `rapid.worker` and `aggregator`.
+**Purpose:** Parses and validates TikTok-specific environment variables independently from the shared `crawler/src/config/env.ts`. Produces a typed `TiktokAppEnv` singleton consumed by `rapid.worker` and `aggregator`.
 
 **Key parsing logic:**
-- `RAPID_API_HOST` + `RAPID_API_KEYS` → expands into `RapidApiConfig[]` — one object per key, all sharing the same host
-- `CRAWL_REGIONS` → splits on comma, trims whitespace, filters empty strings
+- `RAPID_API_HOST` + `RAPID_API_KEYS` → expands into `RapidApiConfig[]` (one entry per key, all sharing the same host)
+- `CRAWL_REGIONS` → comma-split, trimmed, empty entries filtered
+- All numeric variables fall back to safe production defaults if absent or non-parseable
 
 **Exports:** Singleton `env` object evaluated once at module load time.
 
@@ -335,33 +439,31 @@ npm run tiktok:all
 
 ### `workers/source.types.ts` — Collector Interface
 
-**Purpose:** Defines the `IWorkerCollector<TInput>` contract for pluggable data source adapters. `createUnsupportedCollector` provides a placeholder that throws with a clear message if called before a real adapter is wired.
+**Purpose:** Defines the `IWorkerCollector<TInput>` contract for pluggable data source adapters. `createUnsupportedCollector` provides a typed placeholder that throws a descriptive error if called before a concrete adapter is wired.
 
-**Status:** Not yet connected to a live collector. Reserved for future extension.
+**Status:** Not yet connected to a live collector. Reserved for future source-agnostic worker abstraction.
 
 ---
 
-## Execution Guide
-
-### Prerequisites
+## Prerequisites & Setup
 
 ```bash
 # 1. Install Node.js dependencies (from project root)
 npm install
 
-# 2. Install Playwright browser binaries
+# 2. Install Playwright Chromium binary (required for browser-based workers)
 npx playwright install chromium
 
-# 3. Configure environment
-cp .env.example .env
+# 3. Create and configure the environment file
+cp .env.example .env   # or create .env manually
 ```
 
-Edit `.env` with:
+**Minimum `.env` for Pipeline 1 (Serper API discovery + Playwright enrichment):**
 ```bash
-# Pipeline 1 — required
-SERPER_API_KEYS=your_serper_key_1,your_serper_key_2
+# Discovery
+SERPER_API_KEYS=your_key_1,your_key_2
 
-# Pipeline 1 — optional tuning
+# Enrichment tuning (optional — these are the defaults)
 CRAWL_REGION=us
 CRAWL_LANG=en
 SERPER_NUM=100
@@ -370,55 +472,104 @@ SERPER_DELAY_MS=500
 ENRICHER_CONCURRENCY=5
 MAX_VIDEO_AGE_DAYS=1
 VIRAL_SCORE_THRESHOLD=98
-
-# Pipeline 2 — required if using RapidAPI
-RAPID_API_HOST=tiktok-scraper7.p.rapidapi.com
-RAPID_API_KEYS=your_rapid_key_1,your_rapid_key_2
-CRAWL_REGIONS=US,GB
-RAPID_MAX_REQUESTS=150
-RAPID_DELAY_MS=1500
 ```
 
-### Running Pipeline 1 (Production)
+**Additional variables for RapidAPI enrichment:**
+```bash
+RAPID_API_HOST=tokapi-mobile-version.p.rapidapi.com
+RAPID_API_KEYS=your_rapid_key_1,your_rapid_key_2
+CRAWL_REGIONS=US
+RAPID_CONCURRENCY=2
+RAPID_DELAY_MS=1000
+```
+
+---
+
+## Execution Guide
+
+### Pipeline 1 — Production Run (Serper API Discovery)
 
 ```bash
-# Step 1 — Discover TikTok video IDs via Google (Serper API)
+# Step 1 — Discover TikTok video IDs via Serper API + Google Video Search
 npm run tiktok:google
 
-# Step 2 — Deduplicate raw IDs → pending enrichment queue
+# Step 2 — Deduplicate raw IDs → clean pending enrichment queue
 npm run tiktok:filter-id
 
-# Step 3 — Playwright enrichment + viral scoring → feeds backend API
+# Step 3a — Enrich via Playwright (free, needs Chromium)
 npm run tiktok:process-total
+
+# Step 3b — Enrich via RapidAPI (paid, no browser required)
+npm run tiktok:rapid
 ```
 
-### Running Pipeline 2 (RapidAPI Experimental)
+> Run either Step 3a **or** Step 3b depending on your environment. Both consume `id_filter_tt.jsonl` and write to the same output files.
+
+### Pipeline 1 — Production Run (Browser Matrix Discovery)
 
 ```bash
-# Step 1 — Fetch trending feeds from RapidAPI
+# Step 1 — Discover TikTok video IDs via Playwright + Google Advanced Search
+npx tsx crawler/tiktok/gg-advanced-search-scraper.ts
+
+# Step 2 — Deduplicate
+npm run tiktok:filter-id
+
+# Step 3a or 3b — Enrich (same as above)
+npm run tiktok:process-total
+# or
 npm run tiktok:rapid
+```
 
-# Step 2 — Normalize cross-source payloads
-npm run tiktok:normalize
+### Pipeline 2 — Experimental Run
 
-# Step 3 — Apply viral scoring
-npm run tiktok:aggregate
+```bash
+npm run tiktok:rapid      # Fetch raw data into output_json/
+npm run tiktok:normalize  # Parse and cross-deduplicate
+npm run tiktok:aggregate  # Score and filter viral records
 
-# Or: run all 4 stages sequentially
+# Or run all four stages sequentially:
 npm run tiktok:all
 ```
 
-### Checking Progress Mid-Run
+### Monitoring Progress Mid-Run
 
-`process-id-filter-to-total-tt.ts` logs enrichment progress inline:
+The enrichment workers log inline progress:
 ```
 [TikTokEnricher] Enriching [12/340] video ID: 7312345678901234567
-Wrote 11 new records to data/tiktok/total_vids_tt.jsonl
+[RapidEnricher]  Enriching [12/340] video ID: 7312345678901234567
 ```
 
-Monitor queue depth to estimate remaining work:
+Check queue depth to estimate remaining work (requires `wc` — use Git Bash on Windows):
 ```bash
 wc -l data/tiktok/id_filter_tt.jsonl
+```
+
+Persist logs for post-run inspection:
+```bash
+npm run tiktok:process-total 2>&1 | tee logs/tiktok-enrich-$(date +%Y%m%d-%H%M%S).log
+```
+
+### Safe Restart After Interruption
+
+All Pipeline 1 steps are idempotent and safe to restart:
+
+| Step | Safe to re-run? | Reason |
+|---|---|---|
+| `tiktok:google` | Yes | Overwrites `raw_google_output_tt.jsonl` fresh each run |
+| `gg-advanced-search-scraper` | Yes | Overwrites `raw_google_output_tt.jsonl`; pre-seeds already-enriched IDs |
+| `tiktok:filter-id` | Yes | Reads live state of both files; recalculates the pending delta |
+| `tiktok:process-total` | Yes | Appends to output files; filter step skips already-enriched IDs on next pass |
+| `tiktok:rapid` | Yes | Same append-safe behaviour as Playwright enricher |
+
+**After an interrupted enrichment run:**
+```bash
+# Re-dedup to remove any IDs that were written to total_vids before the crash
+npm run tiktok:filter-id
+
+# Resume enrichment from where the queue left off
+npm run tiktok:process-total
+# or
+npm run tiktok:rapid
 ```
 
 ---
@@ -427,96 +578,113 @@ wc -l data/tiktok/id_filter_tt.jsonl
 
 ### TikTok Anti-Bot Fingerprinting
 
-**Challenge:** TikTok's frontend detects headless browsers via `navigator.webdriver`, missing Chrome extension APIs, and timing anomalies.
+**Challenge:** TikTok's frontend detects headless browsers via `navigator.webdriver`, absent Chrome extension APIs, Canvas fingerprint anomalies, and timing regularity.
 
-**Mitigations applied in `process-id-filter-to-total-tt.ts`:**
-- `puppeteer-extra-plugin-stealth` patches all known `navigator.webdriver` exposure points
-- `--disable-blink-features=AutomationControlled` suppresses the Chrome automation flag
-- Realistic Windows 10 user agent string (`Chrome/124.0.0.0`)
-- `en-US` locale and `1280×720` viewport match a real desktop browser
-- Randomized inter-request delay (1–3 s) prevents machine-regular timing patterns
-- Isolated browser contexts per worker prevent cookie-state cross-contamination
+**Mitigations in `process-id-filter-to-total-tt.ts`:**
+- `puppeteer-extra-plugin-stealth` patches all known `navigator.webdriver` and automation exposure points across 10+ evasion modules
+- `--disable-blink-features=AutomationControlled` suppresses the most commonly checked Chrome flag
+- Realistic Windows 10 user agent: `Chrome/124.0.0.0`
+- `en-US` locale + `1280×720` viewport matches a real desktop session
+- Randomized inter-request delay (1,000–3,000 ms per worker) prevents machine-regular timing
+- Isolated browser contexts per worker prevent shared cookie state
 
-### TikTok Rate Limiting (429 / CAPTCHA)
+**If detections increase:** Reduce `ENRICHER_CONCURRENCY` to `2` or `3` and increase the randomized delay floor by editing the `humanDelay` calculation in `process-id-filter-to-total-tt.ts`.
 
-**Challenge:** Repeated requests from a single IP to TikTok video pages trigger progressive rate limiting. At high concurrency, TikTok may serve a CAPTCHA challenge page instead of the video.
+---
+
+### TikTok Rate Limiting (429 / Challenge Page)
+
+**Challenge:** Repeated requests to TikTok video pages from a single IP trigger progressive throttling. At high concurrency, TikTok may serve an interstitial challenge instead of the video.
 
 **Mitigations:**
-- Default concurrency capped at **5** (`ENRICHER_CONCURRENCY`) — tunable downward
-- Network interception (Primary Strategy) means the page only needs to reach the XHR endpoint — the full page does not need to render, reducing request surface
-- One retry per video with a 2-second back-off before giving up
-- If the rate limit is persistent, reduce `ENRICHER_CONCURRENCY` to `2` or `3` in `.env`
+- Default concurrency capped at **5** — tunable via `ENRICHER_CONCURRENCY`
+- Network interception fires before full page render — the scraper only needs the XHR response, not the full DOM
+- One retry per video after a 2-second back-off
 
-**Escalation:** If >20% of videos log `Enrichment failed`, stop the run, wait 30–60 minutes, then restart from where the queue left off (it is safe to re-run `process-id-filter-to-total-tt` — already-enriched IDs are permanently written to `total_vids_tt.jsonl` and will be skipped by `filter-google-ids-tt` on the next run).
+**Escalation:** If more than 20% of videos log `Enrichment failed`:
+1. Stop the enrichment run
+2. Switch to the RapidAPI enricher (`npm run tiktok:rapid`) which bypasses IP reputation issues
+3. Or wait 30–60 minutes then restart (`npm run tiktok:filter-id && npm run tiktok:process-total`)
+
+---
+
+### Google CAPTCHA (`/sorry` Page) in Browser Workers
+
+**Challenge:** `gg-advanced-search-scraper.ts` opens many Google Search pages in rapid succession, which triggers Google's anti-bot challenge (the `/sorry` URL pattern).
+
+**Mitigation:** The bundled `nocaptchaai-extension` automatically detects and resolves Google CAPTCHAs via an AI-powered solver. The worker detects the challenge URL and waits up to 45 seconds for the extension to complete resolution before continuing.
+
+**If the extension fails to resolve:** The worker logs `❌ AI giải CAPTCHA quá thời gian (Timeout)` and proceeds to the next query. The browser profile at `data/user_data_worker_{n}/` retains the post-challenge cookie state, which reduces re-challenge frequency on subsequent queries within the same session.
+
+**Configuration:** The `nocaptchaai-extension` requires a valid API key configured inside the extension itself (via its popup). Without a key, CAPTCHA resolution will not work.
+
+---
 
 ### Serper API Quota Exhaustion
 
 **Challenge:** Serper.dev enforces monthly request quotas per API key.
 
 **Mitigations:**
-- Add multiple keys to `SERPER_API_KEYS` — they are rotated round-robin across queries
-- Reduce `SERPER_MAX_PAGES` from 2 to 1 to halve quota consumption while maintaining broad coverage
-- Tune `SERPER_NUM` (default 100) — lower values use the same quota per page but return fewer results
+- Add multiple keys to `SERPER_API_KEYS` — rotated round-robin
+- Reduce `SERPER_MAX_PAGES` from `2` to `1` to halve quota use with minimal coverage impact
+- Switch to the browser-based `gg-advanced-search-scraper.ts` which requires no API key
 
 **Symptom:** `google.worker` logs `[Serper] HTTP 429` or `[Serper] HTTP 403`.
 
-### RapidAPI Quota / Host Changes
+---
 
-**Challenge:** RapidAPI TikTok scrapers change their endpoint schemas without notice. A host that previously accepted `/trending` may switch to `/feed/search`.
+### RapidAPI Quota and Host Changes
 
-**Mitigations built in:**
-- `buildRapidEndpointCandidates` tries 8 endpoint paths per region per config — the first successful response wins
-- The worker aborts cleanly for a failing host after one retry rather than hanging
+**Challenge:** RapidAPI enforces per-minute and per-month request limits. TikTok scraper services on RapidAPI also periodically change their endpoint schemas without notice.
 
-**Symptom:** `[rapid] Retry failed. Aborting worker {host}` — add a second key pointing to an alternate RapidAPI host.
+**Mitigations:**
+- `RAPID_CONCURRENCY` defaults to **2** — the lowest safe throughput for most RapidAPI plans
+- `RAPID_DELAY_MS` adds a fixed inter-request gap per worker
+- If the current host stops working, update `RAPID_API_HOST` to an alternative RapidAPI-hosted TikTok scraper
 
-### TikTok Schema Changes (`__NEXT_DATA__` / `__UNIVERSAL_DATA_FOR_REHYDRATION__`)
+**Symptom:** Worker logs `[RapidEnricher] API call failed: 429` or `aweme_detail` is consistently `null`.
 
-**Challenge:** TikTok periodically changes the structure of its server-side hydration blobs.
+---
 
-**Current paths probed in DOM fallback:**
+### TikTok Schema Changes
+
+**Challenge:** TikTok periodically changes the JSON path structure of its server-side hydration blobs (`__NEXT_DATA__`, `__UNIVERSAL_DATA_FOR_REHYDRATION__`).
+
+**Current DOM paths probed in `process-id-filter-to-total-tt.ts`:**
 ```
-__NEXT_DATA__ → props.pageProps.itemInfo.itemStruct
-__NEXT_DATA__ → props.pageProps.videoData.itemInfo.itemStruct
-__UNIVERSAL_DATA_FOR_REHYDRATION__ → __DEFAULT_SCOPE__["webapp.video-detail"].itemInfo.itemStruct
-```
-
-**Detection:** If `detail` is `null` after both the network intercept and the DOM fallback, the log line `[TikTokEnricher] Enrichment failed for video ID {id}` appears.
-
-**Recovery:** Check the actual page response in a real browser. If the JSON path has changed, update the `page.evaluate` block in `process-id-filter-to-total-tt.ts` → the two `??` chains that read from the DOM elements.
-
-### Interrupted Runs and Safe Restarts
-
-All three Pipeline 1 steps are idempotent and safe to restart:
-
-| Step | Safe to re-run? | Reason |
-|------|----------------|--------|
-| `tiktok:google` | Yes | Overwrites `raw_google_output_tt.jsonl` fresh each run |
-| `tiktok:filter-id` | Yes | Reads live state of `total_vids_tt.jsonl` and `id_filter_tt.jsonl`; recalculates the delta |
-| `tiktok:process-total` | Yes | Appends to output files; `filter-google-ids-tt` will skip already-enriched IDs on the next pass |
-
-**After an interrupted enrichment run:**
-```bash
-# Re-dedup the queue to remove any IDs that made it to total_vids before the crash
-npm run tiktok:filter-id
-
-# Resume enrichment
-npm run tiktok:process-total
+#__NEXT_DATA__                        → props.pageProps.itemInfo.itemStruct
+#__NEXT_DATA__                        → props.pageProps.videoData.itemInfo.itemStruct
+#__UNIVERSAL_DATA_FOR_REHYDRATION__   → __DEFAULT_SCOPE__["webapp.video-detail"].itemInfo.itemStruct
 ```
 
-### Checking Logs
+**Detection:** If both the network intercept and the DOM fallback fail, `detail` is `null` and the worker logs `[TikTokEnricher] Enrichment failed for video ID {id}`.
 
-All scripts log to stdout with `[tag]` prefixes:
+**Recovery:** Open the failing TikTok URL in a real browser and inspect the contents of `#__NEXT_DATA__` or `#__UNIVERSAL_DATA_FOR_REHYDRATION__`. Update the `??` chain in the `page.evaluate` block in `process-id-filter-to-total-tt.ts` to reflect the new path.
+
+The network intercept path (`/api/item/detail`) is typically more stable than the DOM structure — if it fires consistently, DOM path breakage has no impact.
+
+---
+
+## Log Reference
+
+All scripts emit structured log lines with bracketed component tags:
 
 ```
 [GoogleWorker] Query: "tiktok viral us today" | page=1
 [GoogleWorker] Added: 12 | Total unique seeds: 487
-[rapid] [req #23/150] Fetching US (/trending)
-[TikTokEnricher] Enriching [45/340] video ID: 7312345678901234567
-[aggregator] Viral videos found: 214 (threshold: 90)
-```
 
-Persist logs to file for post-run inspection:
-```bash
-npm run tiktok:all 2>&1 | tee logs/tiktok-$(date +%Y%m%d-%H%M%S).log
+[Worker 3] [Query 45/560] 🔍 Google Search: site:tiktok.com/ "bz"
+[Worker 3] 🚨 Gặp CAPTCHA! Đang chờ noCaptcha AI Extension tự động giải quyết...
+[Worker 3] 🎉 Vượt CAPTCHA thành công!
+[Worker 3] 💾 Đã bóc được 8 TikTok videos
+
+[TikTokEnricher] Enriching [45/340] video ID: 7312345678901234567
+[RapidEnricher] Enriching [45/340] video ID: 7312345678901234567
+
+[normalize] Rapid total: 1500
+[normalize] Google total: 340
+[normalize] Unique candidates saved: 1724
+
+[aggregator] Total candidates evaluated: 1724
+[aggregator] Viral videos found: 214 (threshold: 90)
 ```
