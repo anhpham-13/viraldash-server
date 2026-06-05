@@ -88,6 +88,8 @@ async function loadExistingIds(): Promise<Set<string>> {
   return ids;
 }
 
+const MAX_CONSECUTIVE_EMPTY = 2;
+
 /**
  * Logic xử lý lõi của từng Luồng trình duyệt (Worker Context)
  */
@@ -108,6 +110,7 @@ async function searchWorker(workerId: number, queries: string[], seenIds: Set<st
   });
 
   const page: Page = await browserContext.newPage();
+  let consecutiveEmpty = 0;
 
   for (let i = 0; i < queries.length; i++) {
     const query = queries[i]!;
@@ -124,9 +127,14 @@ async function searchWorker(workerId: number, queries: string[], seenIds: Set<st
       if (page.url().includes("google.com/sorry")) {
         console.warn(`[Worker ${workerId}] 🚨 Gặp CAPTCHA! Đang chờ noCaptcha AI Extension tự động giải quyết...`);
 
-        await page.waitForURL((url) => !url.href.includes("google.com/sorry"), { timeout: 45000 })
-          .then(() => console.log(`[Worker ${workerId}] 🎉 Vượt CAPTCHA thành công!`))
-          .catch(() => console.error(`[Worker ${workerId}] ❌ AI giải CAPTCHA quá thời gian (Timeout).`));
+        const solved = await page.waitForURL((url) => !url.href.includes("google.com/sorry"), { timeout: 45000 })
+          .then(() => { console.log(`[Worker ${workerId}] 🎉 Vượt CAPTCHA thành công!`); return true; })
+          .catch(() => { console.error(`[Worker ${workerId}] ❌ AI giải CAPTCHA quá thời gian (Timeout). Dừng worker.`); return false; });
+
+        if (!solved) {
+          await browserContext.close();
+          return;
+        }
       }
 
       // Trích xuất toàn bộ liên kết chứa youtube.com/shorts từ Google SERP HTML
@@ -155,6 +163,16 @@ async function searchWorker(workerId: number, queries: string[], seenIds: Set<st
 
       if (savedCount > 0) {
         console.log(`[Worker ${workerId}] 💾 Đã bóc được ${savedCount} Shorts cho vào file gg_output.jsonl.`);
+        consecutiveEmpty = 0;
+      } else {
+        consecutiveEmpty++;
+        console.warn(`[Worker ${workerId}] ⚠️ Không crawl được data (${consecutiveEmpty}/${MAX_CONSECUTIVE_EMPTY} lần liên tiếp).`);
+
+        if (consecutiveEmpty >= MAX_CONSECUTIVE_EMPTY) {
+          console.error(`[Worker ${workerId}] 🛑 Vượt ngưỡng ${MAX_CONSECUTIVE_EMPTY} lần không có data. Dừng worker.`);
+          await browserContext.close();
+          return;
+        }
       }
 
       // Giãn cách nhẹ để tránh Google quét hành vi bot
