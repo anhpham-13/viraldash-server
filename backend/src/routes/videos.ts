@@ -66,9 +66,9 @@ videosRouter.get('/', async (c) => {
 
   // ── Apply filters — order: cheapest checks first ───────────────────────────
 
-  // 1. Age — always applied; default to 24h if caller did not pass maxAge
-  const effectiveMaxAge = Number.isFinite(maxAge) ? maxAge : 24;
-  let result = all.filter(v => v.age_hours <= effectiveMaxAge);
+  // 1. Age — apply if caller passed maxAge/minAge
+  let result = all;
+  if (Number.isFinite(maxAge)) result = result.filter(v => v.age_hours <= maxAge);
   if (Number.isFinite(minAge)) result = result.filter(v => v.age_hours >= minAge);
 
   // 2. Platform

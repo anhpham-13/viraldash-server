@@ -91,9 +91,8 @@ export function KPIStrip({ platform = 'all' }: { platform?: string }) {
   }
 
   return (
-    <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 mb-6">
+    <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 mb-6">
       <KPICard title="Total Videos Crawled" value={stats.totalVideosCrawled.toLocaleString()} trend={0} data={sparklines.s1} />
-      <KPICard title="New Videos (24h)"     value={stats.newVideos24h.toLocaleString()}       trend={0} data={sparklines.s2} />
       <KPICard title="Trending Videos"      value={stats.trendingVideos.toLocaleString()}     trend={0} data={sparklines.s3} />
       <KPICard title="Avg Viral Velocity"   value={`${stats.avgVelocity.toFixed(2)} v/h`}    trend={0} data={sparklines.s4} />
       <KPICard title="Avg Engagement Rate"  value={`${stats.avgEngagement.toFixed(2)}%`}     trend={0} data={sparklines.s5} />
