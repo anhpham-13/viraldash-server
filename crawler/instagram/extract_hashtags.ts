@@ -11,24 +11,58 @@ const ONLY_SHORTS = false;
 type ViralVideo = {
   id?: string;
   video_id?: string;
+  platform?: string;
   url?: string;
+
+  postDate?: string;
+  fetchedAt?: string;
+
   tags?: string[];
+  hashtags?: string[];
+
+  views?: number | string;
+  likes?: number | string;
+  comments?: number | string;
+  saves?: number | string;
+  shares?: number | string;
+
+  total_view_growth?: number;
+
+  sound?: string | {
+    id?: string;
+    title?: string;
+    artist?: string;
+  };
+
+  author?: string | {
+    id?: string;
+    username?: string;
+    fullName?: string;
+  };
+
+  engagement_score?: number;
+  viral_velocity?: number;
+  rolling_velocity?: number | null;
+  viral_acceleration?: number | null;
+  viral_score?: number;
+
+  engagementRate?: number;
+  viralVelocity?: number;
+  rollingVelocity?: number | null;
+  viralAcceleration?: number | null;
+  viralScore?: number;
+
   snippet?: {
     tags?: string[];
     publishedAt?: string;
     channelId?: string;
   };
+
   statistics?: {
     viewCount?: string | number;
     likeCount?: string | number;
     commentCount?: string | number;
   };
-  viralScore?: number;
-  viral_score?: number;
-  hashtags?: string[];
-  views?: number | string;
-  likes?: number | string;
-  comments?: number | string;
 };
 
 type TagStat = {

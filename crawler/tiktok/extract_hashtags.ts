@@ -11,23 +11,49 @@ const ONLY_SHORTS = false;
 type ViralVideo = {
   id?: string;
   video_id?: string;
+  platform?: string;
   url?: string;
-  tags?: string[];
+
+  postDate?: string;
+  fetchedAt?: string;
+
+  hashtags?: string[];
+
+  views?: number | string;
+  view_count?: number | string;
+  likes?: number | string;
+  comments?: number | string;
+  saves?: number | string;
+  shares?: number | string;
+
+  total_view_growth?: number;
+
+  sound?: string;
+  author?: string;
+
+  engagement_score?: number;
+  viral_velocity?: number;
+  rolling_velocity?: number | null;
+  viral_acceleration?: number | null;
+  viral_score?: number;
+
+  engagementRate?: number;
+  viralVelocity?: number;
+  rollingVelocity?: number | null;
+  viralAcceleration?: number | null;
+  viralScore?: number;
+
   snippet?: {
     tags?: string[];
     publishedAt?: string;
     channelId?: string;
   };
+
   statistics?: {
     viewCount?: string | number;
     likeCount?: string | number;
     commentCount?: string | number;
   };
-  viralScore?: number;
-  viral_score?: number;
-  view_count?: number | string;
-  likes?: number | string;
-  comments?: number | string;
 };
 
 type TagStat = {
@@ -277,16 +303,25 @@ export function runExtractHashtags(): void {
       continue;
     }
 
-    const id = video.id || video.video_id;
+    const id = video.id || video.video_id || video.url;
     if (!id) continue;
 
-    const viewCount = safeNumber(video.view_count) || safeNumber(video.statistics?.viewCount);
-    const likeCount = safeNumber(video.likes) || safeNumber(video.statistics?.likeCount);
-    const commentCount = safeNumber(video.comments) || safeNumber(video.statistics?.commentCount);
+    const viewCount =
+      safeNumber(video.views) ||
+      safeNumber(video.view_count) ||
+      safeNumber(video.statistics?.viewCount);
+
+    const likeCount =
+      safeNumber(video.likes) ||
+      safeNumber(video.statistics?.likeCount);
+
+    const commentCount =
+      safeNumber(video.comments) ||
+      safeNumber(video.statistics?.commentCount);
     const viralScore =
       safeNumber(video.viralScore) || safeNumber(video.viral_score);
 
-    const rawTags = [...(video.tags || []), ...(video.snippet?.tags || [])];
+    const rawTags = [...(video.hashtags || []), ...(video.snippet?.tags || [])];
 
     const uniqueTags = new Set(
       rawTags
