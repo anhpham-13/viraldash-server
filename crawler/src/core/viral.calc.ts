@@ -2,10 +2,10 @@ import type { IYouTubeVideoRaw, IYouTubeVideoScored } from "./types.js";
 
 // ─── Threshold constants ──────────────────────────────────────────────────────
 /** Maximum video age (hours) for viral-score consideration */
-const MAX_VIDEO_AGE_HOURS = 24;
+const MAX_VIDEO_AGE_HOURS = 48;
 
 const MIN_VIEWS = 2_000;
-const MIN_VIEWS_PER_HOUR = 300;
+const MIN_VIEWS_PER_HOUR = 5000;
 const MIN_LIKES = 100;
 const MIN_LIKE_RATE = 0.01; // 1%
 
@@ -111,10 +111,10 @@ export function calcViralAcceleration(
  * and normalised so that genuine viral outliers saturate the scale.
  */
 export function calcViralScore(video: IYouTubeVideoRaw): number {
-  const views    = safeNumber((video as any).view_count ?? (video as any).views    ?? (video as any).statistics?.viewCount);
-  const likes    = safeNumber((video as any).likes      ?? (video as any).statistics?.likeCount);
-  const comments = safeNumber((video as any).comments   ?? (video as any).statistics?.commentCount);
-  const saves    = safeNumber((video as any).favorites  ?? (video as any).saves    ?? (video as any).statistics?.favoriteCount ?? 0);
+  const views = safeNumber((video as any).view_count ?? (video as any).views ?? (video as any).statistics?.viewCount);
+  const likes = safeNumber((video as any).likes ?? (video as any).statistics?.likeCount);
+  const comments = safeNumber((video as any).comments ?? (video as any).statistics?.commentCount);
+  const saves = safeNumber((video as any).favorites ?? (video as any).saves ?? (video as any).statistics?.favoriteCount ?? 0);
 
   const publishedAt =
     (video as any).published_at ??
@@ -123,14 +123,14 @@ export function calcViralScore(video: IYouTubeVideoRaw): number {
     (video as any).publishedAt;
 
   const fetchedAt = (video as any).fetchedAt ?? new Date().toISOString();
-  const ageHours  = getAgeHours(publishedAt, fetchedAt);
+  const ageHours = getAgeHours(publishedAt, fetchedAt);
 
   if (!Number.isFinite(ageHours) || ageHours <= 0 || ageHours > MAX_VIDEO_AGE_HOURS) {
     return 0;
   }
 
   const viewsPerHour = calcViralityVelocity(views, ageHours);
-  const likeRate     = views > 0 ? likes / views : 0;
+  const likeRate = views > 0 ? likes / views : 0;
 
   // Gate filters — weed out low-signal videos
   if (
@@ -144,12 +144,12 @@ export function calcViralScore(video: IYouTubeVideoRaw): number {
 
   const engagementRate = calcEngagementRate(likes, comments, saves, views);
 
-  const viewComponent      = Math.min(30, Math.log10(views + 1) * 8);
-  const speedComponent     = Math.min(35, Math.log10(viewsPerHour + 1) * 12);
-  const likeComponent      = Math.min(15, Math.log10(likes + 1) * 5);
-  const commentComponent   = Math.min(10, Math.log10(comments + 1) * 5);
+  const viewComponent = Math.min(30, Math.log10(views + 1) * 8);
+  const speedComponent = Math.min(35, Math.log10(viewsPerHour + 1) * 12);
+  const likeComponent = Math.min(15, Math.log10(likes + 1) * 5);
+  const commentComponent = Math.min(10, Math.log10(comments + 1) * 5);
   const engagementComponent = Math.min(10, (engagementRate / 2) * 10); // normalised: 2% ER → full 10pts
-  const recencyComponent   = Math.max(0, 10 - ageHours * 0.4);
+  const recencyComponent = Math.max(0, 10 - ageHours * 0.4);
 
   const rawScore =
     viewComponent +
@@ -171,10 +171,10 @@ export function calcViralScore(video: IYouTubeVideoRaw): number {
  * Callers may override these after loading snapshot history.
  */
 export function withViralMetrics(video: IYouTubeVideoRaw): IYouTubeVideoScored {
-  const views    = safeNumber((video as any).view_count ?? (video as any).views    ?? (video as any).statistics?.viewCount);
-  const likes    = safeNumber((video as any).likes      ?? (video as any).statistics?.likeCount);
-  const comments = safeNumber((video as any).comments   ?? (video as any).statistics?.commentCount);
-  const saves    = safeNumber((video as any).favorites  ?? (video as any).saves    ?? (video as any).statistics?.favoriteCount ?? 0);
+  const views = safeNumber((video as any).view_count ?? (video as any).views ?? (video as any).statistics?.viewCount);
+  const likes = safeNumber((video as any).likes ?? (video as any).statistics?.likeCount);
+  const comments = safeNumber((video as any).comments ?? (video as any).statistics?.commentCount);
+  const saves = safeNumber((video as any).favorites ?? (video as any).saves ?? (video as any).statistics?.favoriteCount ?? 0);
 
   const publishedAt =
     (video as any).published_at ??
@@ -183,11 +183,11 @@ export function withViralMetrics(video: IYouTubeVideoRaw): IYouTubeVideoScored {
     (video as any).publishedAt;
 
   const fetchedAt = (video as any).fetchedAt ?? new Date().toISOString();
-  const ageHours  = getAgeHours(publishedAt, fetchedAt);
+  const ageHours = getAgeHours(publishedAt, fetchedAt);
 
   const engagement_score = Number(calcEngagementRate(likes, comments, saves, views).toFixed(2));
-  const viral_velocity   = Number(calcViralityVelocity(views, ageHours).toFixed(2));
-  const viral_score      = calcViralScore(video);
+  const viral_velocity = Number(calcViralityVelocity(views, ageHours).toFixed(2));
+  const viral_score = calcViralScore(video);
 
   return {
     ...video,
