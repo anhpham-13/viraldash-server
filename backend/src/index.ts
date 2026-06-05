@@ -34,7 +34,7 @@ app.use(
       return ALLOWED_ORIGINS.includes(origin) ? origin : null;
     },
     allowMethods: ['GET', 'OPTIONS'],
-    allowHeaders: ['Content-Type', 'Authorization'],
+    allowHeaders: ['Content-Type', 'Authorization', 'ngrok-skip-browser-warning'],
     credentials:  true,
     maxAge:       86_400,
   }),

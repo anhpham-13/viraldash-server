@@ -1,7 +1,10 @@
 // Base URL is baked into the client bundle at build time by Next.js.
 // Set NEXT_PUBLIC_API_URL in .env.local (dev) or in your deployment platform (prod).
-// Falls back to localhost:4000 for local development without an env file.
-const API_BASE = (process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4000').replace(/\/$/, '');
+// On the server, we need the absolute URL. On the client, we use relative paths
+// so requests go through Next.js rewrites (avoiding Ngrok CORS preflights).
+const API_BASE = typeof window === 'undefined' 
+  ? (process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4000').replace(/\/$/, '')
+  : '';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -127,7 +130,9 @@ async function apiFetch<T>(
   params?: RawParams,
   init?: RequestInit,
 ): Promise<T> {
-  const url = new URL(`${API_BASE}${path}`);
+  const urlStr = `${API_BASE}${path}`;
+  const base = typeof window !== 'undefined' ? window.location.origin : undefined;
+  const url = new URL(urlStr, base);
 
   if (params) {
     for (const [k, v] of Object.entries(params)) {
@@ -136,9 +141,13 @@ async function apiFetch<T>(
     }
   }
 
+  const headers = new Headers(init?.headers);
+  headers.set('ngrok-skip-browser-warning', 'true');
+
   const res = await fetch(url.toString(), {
     cache: 'no-store', // always fetch fresh data; disable Next.js data cache
     ...init,
+    headers,
   });
 
   if (!res.ok) {
