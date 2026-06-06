@@ -1,36 +1,115 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# ViralScope — Frontend Dashboard
 
-## Getting Started
+Next.js 14 dashboard UI for the ViralScope monorepo. Reads data exclusively from the backend API (`/api/*`) — no direct MongoDB or filesystem access.
 
-First, run the development server:
+---
+
+## Stack
+
+- **Next.js 14** (App Router)
+- **React 18** + TypeScript
+- **Tailwind CSS v4**
+- **shadcn/ui** component primitives (Card, Badge, Sheet, Select, etc.)
+- **date-fns** for time formatting
+- **Lucide React** icons
+
+---
+
+## Setup
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+# From project root — installs all workspace deps including frontend
+npm install
+
+# Create local env file
+echo "NEXT_PUBLIC_API_URL=http://localhost:4000" > frontend/.env.local
+
+# Dev server
+npm run frontend:dev   # → http://localhost:3000
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+---
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Environment Variables
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `NEXT_PUBLIC_API_URL` | Yes (prod) | Backend API base URL. In dev, requests are proxied via Next.js rewrites to avoid ngrok CORS. |
 
-## Learn More
+---
 
-To learn more about Next.js, take a look at the following resources:
+## Project Structure
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```
+frontend/src/
+├── app/
+│   ├── layout.tsx          Root layout (dark theme, font)
+│   └── page.tsx            Main dashboard page
+├── components/
+│   ├── dashboard/
+│   │   ├── DashboardClient.tsx   Client-side data container + platform filter
+│   │   ├── KPIStrip.tsx          Top KPI cards strip
+│   │   ├── ViralTable.tsx        Sortable/filterable video table
+│   │   ├── VideoDrawer.tsx       Video detail side panel
+│   │   └── AlertFeed.tsx         Hockey-stick & resurgence alerts
+│   ├── charts/
+│   │   ├── EarlySniper.tsx       Early velocity chart
+│   │   ├── HashtagSurge.tsx      Trending hashtag surges
+│   │   └── QuantileCurves.tsx    Score distribution curves
+│   └── ui/                       shadcn primitives (card, badge, sheet, …)
+├── hooks/
+│   └── useTableState.ts    Table sort / filter / pagination state
+└── lib/
+    ├── api-client.ts       Typed HTTP client for all backend endpoints
+    └── utils.ts            Utility helpers
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+---
 
-## Deploy on Vercel
+## Key Components
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+### `KPIStrip`
+Top strip of KPI cards. Fetches from `/api/stats`.
+- Viral thresholds reference table (per-platform gate values)
+- Total videos, new (snapshot_count = 1), accelerating, declining, active hashtags
+- **Last Refresh** card — shows `last_refreshed_at` per platform (YouTube / TikTok / Instagram)
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+### `ViralTable`
+Main data table. Fetches from `/api/videos` with server-side filtering and sorting.
+- Columns: platform, status badge, views, likes, velocity (v/h), acceleration, viral score, age, snapshots
+- Filter panel: platform, status, score/velocity/view/age/snapshot ranges, text search
+- Sort on any metric column; pagination
+
+### `VideoDrawer`
+Side panel opened by clicking a table row. Fetches from `/api/videos/:id/snapshots?platform=`.
+- Core metrics: views, likes, comments, saves
+- Calculated analytics: engagement rate, viral velocity, acceleration, viral score
+- **Snapshot Timeline** — roadmap of every data snapshot:
+  - First snapshot: label "Start" + lifetime velocity at crawl time
+  - Subsequent: "+Xh" elapsed since previous, delta views (green), rolling velocity, viral score
+- Tags and sound info
+
+### `AlertFeed`
+Fetches from `/api/alerts`. Shows hockey-stick breakouts and resurgence signals.
+
+### `api-client.ts`
+Single source of truth for all API calls:
+```typescript
+api.videos(params)                       // GET /api/videos
+api.videoSnapshots(platform, videoId)    // GET /api/videos/:id/snapshots
+api.stats(platform?)                     // GET /api/stats
+api.hashtags(platform?)                  // GET /api/hashtags
+api.alerts()                             // GET /api/alerts
+```
+
+---
+
+## Build & Deploy
+
+```bash
+npm run frontend:build   # Next.js production build
+npm run frontend:start   # Start production server (:3000)
+npm run frontend:lint    # ESLint check
+```
+
+For production, set `NEXT_PUBLIC_API_URL` to your deployed backend URL.

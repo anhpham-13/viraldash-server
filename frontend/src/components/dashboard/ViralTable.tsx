@@ -1,26 +1,26 @@
 "use client";
 
-import { useState } from "react";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, ArrowUpDown } from "lucide-react";
-import { formatDistanceToNow } from "date-fns";
+import type { Video } from "@/lib/api-client";
 
 interface ViralTableProps {
-  videos: any[];
+  videos: Video[];
   total: number;
   page: number;
   limit: number;
   platform?: string;
+  activeTab?: string;
   onPageChange: (page: number) => void;
   onLimitChange: (limit: number) => void;
   onSortChange: (key: string) => void;
   onPlatformChange?: (platform: string) => void;
-  onRowClick: (video: any) => void;
+  onRowClick: (video: Video) => void;
 }
 
-export function ViralTable({ videos, total, page, limit, platform, onPageChange, onLimitChange, onSortChange, onPlatformChange, onRowClick }: ViralTableProps) {
+export function ViralTable({ videos, total, page, limit, activeTab, onPageChange, onLimitChange, onSortChange, onRowClick }: ViralTableProps) {
   const totalPages = Math.ceil(total / limit);
 
   const handlePageChange = (newPage: number) => {
@@ -29,16 +29,14 @@ export function ViralTable({ videos, total, page, limit, platform, onPageChange,
   };
 
   const formatNumber = (n: number) => {
-    if (n >= 1000000) return (n / 1000000).toFixed(2) + 'M';
-    if (n >= 1000) return (n / 1000).toFixed(2) + 'K';
+    if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'M';
+    if (n >= 1_000)     return (n / 1_000).toFixed(2) + 'K';
     return Number.isInteger(n) ? n.toString() : n.toFixed(2);
   };
 
   const formatAge = (hours: number) => {
     if (hours == null) return '—';
-    if (hours < 1) {
-      return `${Math.round(hours * 60)}m`;
-    }
+    if (hours < 1) return `${Math.round(hours * 60)}m`;
     const h = Math.floor(hours);
     const m = Math.round((hours - h) * 60);
     return m > 0 ? `${h}h ${m}m` : `${h}h`;
@@ -46,73 +44,115 @@ export function ViralTable({ videos, total, page, limit, platform, onPageChange,
 
   const renderStatus = (status: string) => {
     switch (status) {
-      case 'Viral': return <Badge className="bg-rose-500/20 text-rose-500 border-rose-500/30">Viral</Badge>;
-      case 'Trending': return <Badge className="bg-amber-500/20 text-amber-500 border-amber-500/30">Trending</Badge>;
+      case 'Viral':     return <Badge className="bg-rose-500/20 text-rose-500 border-rose-500/30">Viral</Badge>;
+      case 'Trending':  return <Badge className="bg-amber-500/20 text-amber-500 border-amber-500/30">Trending</Badge>;
       case 'Declining': return <Badge className="bg-zinc-500/20 text-zinc-400 border-zinc-500/30">Declining</Badge>;
-      default: return <Badge className="bg-emerald-500/20 text-emerald-500 border-emerald-500/30">Emerging</Badge>;
+      default:          return <Badge className="bg-emerald-500/20 text-emerald-500 border-emerald-500/30">Emerging</Badge>;
     }
+  };
+
+  const renderAccel = (accel: number | null, snapshotCount: number) => {
+    if (accel == null) {
+      const tip = snapshotCount < 2
+        ? 'Need 1 refresh for accel data'
+        : 'Need 2 refreshes for accel data';
+      return (
+        <span className="text-zinc-600 text-xs font-mono" title={tip}>—</span>
+      );
+    }
+    const color  = accel > 0 ? 'text-emerald-400' : accel < 0 ? 'text-rose-400' : 'text-zinc-500';
+    const prefix = accel > 0 ? '+' : '';
+    return <span className={`font-mono text-sm ${color}`}>{prefix}{Math.round(accel)}</span>;
   };
 
   return (
     <div className="flex flex-col bg-zinc-900 border border-zinc-800 rounded-lg overflow-hidden">
       <div className="overflow-x-auto">
-        <Table className="table-fixed min-w-[70rem]">
+        <Table className="table-fixed min-w-[78rem]">
           <TableHeader className="bg-zinc-900 border-b border-zinc-800">
             <TableRow className="hover:bg-transparent border-zinc-800">
-              <TableHead className="w-[4rem] min-w-[4rem] max-w-[4rem]">Rank</TableHead>
-              <TableHead className="w-[12rem] min-w-[12rem] max-w-[12rem]">Video ID</TableHead>
-              <TableHead className="w-[8rem] min-w-[8rem] max-w-[8rem]">Platform</TableHead>
-              <TableHead className="w-[7rem] min-w-[7rem] max-w-[7rem] cursor-pointer hover:text-zinc-100" onClick={() => onSortChange('age_hours')}>
+              <TableHead className="w-[4rem]">Rank</TableHead>
+              <TableHead className="w-[12rem]">Video ID</TableHead>
+              <TableHead className="w-[8rem]">Platform</TableHead>
+              <TableHead className="w-[7rem] cursor-pointer hover:text-zinc-100" onClick={() => onSortChange('age_hours')}>
                 Age <ArrowUpDown className="inline w-3 h-3 ml-1" />
               </TableHead>
-              <TableHead className="w-[8rem] min-w-[8rem] max-w-[8rem] text-right cursor-pointer hover:text-zinc-100" onClick={() => onSortChange('view_count')}>
+              <TableHead className="w-[8rem] text-right cursor-pointer hover:text-zinc-100" onClick={() => onSortChange('view_count')}>
                 Views <ArrowUpDown className="inline w-3 h-3 ml-1" />
               </TableHead>
-              <TableHead className="w-[7rem] min-w-[7rem] max-w-[7rem] text-right cursor-pointer hover:text-zinc-100" onClick={() => onSortChange('engagement_score')}>
+              <TableHead className="w-[7rem] text-right cursor-pointer hover:text-zinc-100" onClick={() => onSortChange('engagement_score')}>
                 ER % <ArrowUpDown className="inline w-3 h-3 ml-1" />
               </TableHead>
-              <TableHead className="w-[9rem] min-w-[9rem] max-w-[9rem] text-right cursor-pointer hover:text-zinc-100" onClick={() => onSortChange('viral_velocity')}>
+              <TableHead className="w-[9rem] text-right cursor-pointer hover:text-zinc-100" onClick={() => onSortChange('viral_velocity')}>
                 Velocity <ArrowUpDown className="inline w-3 h-3 ml-1" />
               </TableHead>
-              <TableHead className="w-[8rem] min-w-[8rem] max-w-[8rem] text-right cursor-pointer hover:text-zinc-100" onClick={() => onSortChange('viral_score')}>
+              <TableHead className="w-[7rem] text-right cursor-pointer hover:text-zinc-100" onClick={() => onSortChange('viral_acceleration')}>
+                Accel <ArrowUpDown className="inline w-3 h-3 ml-1" />
+              </TableHead>
+              <TableHead className="w-[7rem] text-right cursor-pointer hover:text-zinc-100" onClick={() => onSortChange('viral_score')}>
                 Score <ArrowUpDown className="inline w-3 h-3 ml-1" />
               </TableHead>
-              <TableHead className="w-[6rem] min-w-[6rem] max-w-[6rem] text-center">Status</TableHead>
+              <TableHead className="w-[6rem] text-center">Status</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {videos.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={9} className="h-24 text-center text-zinc-500">No videos found.</TableCell>
+                <TableCell colSpan={10} className="h-24 text-center text-zinc-500">No videos found.</TableCell>
               </TableRow>
             ) : (
               videos.map((v, i) => (
-                <TableRow 
-                  key={v.video_id || i} 
+                <TableRow
+                  key={v.video_id || i}
                   className="hover:bg-zinc-800/50 cursor-pointer border-zinc-800 transition-colors"
                   onDoubleClick={() => onRowClick(v)}
                   onContextMenu={(e) => {
                     e.preventDefault();
-                    if (v.url) {
-                      window.open(v.url, '_blank');
-                    }
+                    if (v.url) window.open(v.url, '_blank');
                   }}
                 >
-                  <TableCell className="font-mono text-zinc-500 w-[4rem] min-w-[4rem] max-w-[4rem] truncate">#{(page - 1) * limit + i + 1}</TableCell>
-                  <TableCell className="font-mono text-sm w-[12rem] min-w-[12rem] max-w-[12rem] truncate">{v.video_id}</TableCell>
-                  <TableCell className="w-[8rem] min-w-[8rem] max-w-[8rem] truncate">
+                  <TableCell className="font-mono text-zinc-500 w-[4rem] truncate">
+                    #{(page - 1) * limit + i + 1}
+                  </TableCell>
+                  <TableCell className="font-mono text-sm w-[12rem] truncate">{v.video_id}</TableCell>
+                  <TableCell className="w-[8rem] truncate">
                     <span className="text-[10px] uppercase tracking-wider bg-zinc-800 px-2 py-1 rounded text-zinc-300">
                       {v.platform?.replace('_', ' ')}
                     </span>
                   </TableCell>
-                  <TableCell className="text-zinc-400 text-sm w-[7rem] min-w-[7rem] max-w-[7rem] truncate">
-                    {formatAge(v.age_hours)}
+                  <TableCell className="text-zinc-400 text-sm w-[7rem]">
+                    <span>{formatAge(v.age_hours)}</span>
+                    <span
+                      className={`ml-1.5 text-[9px] font-mono rounded px-1 ${
+                        (v.snapshot_count ?? 1) >= 3 ? 'text-emerald-600 bg-emerald-950/60' :
+                        (v.snapshot_count ?? 1) >= 2 ? 'text-blue-600 bg-blue-950/60' :
+                                                       'text-zinc-600 bg-zinc-800/80'
+                      }`}
+                      title={`${v.snapshot_count ?? 1} snapshot${(v.snapshot_count ?? 1) !== 1 ? 's' : ''}`}
+                    >
+                      ×{v.snapshot_count ?? 1}
+                    </span>
                   </TableCell>
-                  <TableCell className="text-right font-mono text-sm w-[8rem] min-w-[8rem] max-w-[8rem] truncate">{formatNumber(v.view_count || 0)}</TableCell>
-                  <TableCell className="text-right font-mono text-sm text-blue-400 w-[7rem] min-w-[7rem] max-w-[7rem] truncate">{(v.engagement_score || 0).toFixed(2)}%</TableCell>
-                  <TableCell className="text-right font-mono text-sm w-[9rem] min-w-[9rem] max-w-[9rem] truncate">{formatNumber(v.viral_velocity || 0)} v/h</TableCell>
-                  <TableCell className="text-right font-bold text-emerald-400 w-[8rem] min-w-[8rem] max-w-[8rem] truncate">{typeof v.viral_score === 'number' && !Number.isInteger(v.viral_score) ? (v.viral_score || 0).toFixed(2) : (v.viral_score || 0)}</TableCell>
-                  <TableCell className="text-center w-[6rem] min-w-[6rem] max-w-[6rem] truncate">{renderStatus(v.status)}</TableCell>
+                  <TableCell className="text-right font-mono text-sm w-[8rem] truncate">
+                    {formatNumber(v.view_count || 0)}
+                  </TableCell>
+                  <TableCell className="text-right font-mono text-sm text-blue-400 w-[7rem] truncate">
+                    {(v.engagement_score || 0).toFixed(2)}%
+                  </TableCell>
+                  <TableCell className="text-right font-mono text-sm w-[9rem] truncate">
+                    {formatNumber(v.viral_velocity || 0)} v/h
+                  </TableCell>
+                  <TableCell className="text-right w-[7rem] truncate">
+                    {renderAccel(v.viral_acceleration, v.snapshot_count ?? 1)}
+                  </TableCell>
+                  <TableCell className="text-right font-bold text-emerald-400 w-[7rem] truncate">
+                    {typeof v.viral_score === 'number' && !Number.isInteger(v.viral_score)
+                      ? (v.viral_score || 0).toFixed(2)
+                      : (v.viral_score || 0)}
+                  </TableCell>
+                  <TableCell className="text-center w-[6rem] truncate">
+                    {renderStatus(v.status)}
+                  </TableCell>
                 </TableRow>
               ))
             )}
@@ -138,9 +178,7 @@ export function ViralTable({ videos, total, page, limit, platform, onPageChange,
               onChange={(e) => onLimitChange(Number(e.target.value))}
             >
               {[10, 25, 50, 100].map((pageSize) => (
-                <option key={pageSize} value={pageSize}>
-                  {pageSize}
-                </option>
+                <option key={pageSize} value={pageSize}>{pageSize}</option>
               ))}
             </select>
           </div>
@@ -148,36 +186,20 @@ export function ViralTable({ videos, total, page, limit, platform, onPageChange,
             Page {page} of {totalPages || 1}
           </div>
           <div className="flex items-center space-x-2">
-            <Button
-              variant="outline"
-              className="hidden h-8 w-8 p-0 lg:flex bg-zinc-900 border-zinc-800"
-              onClick={() => handlePageChange(1)}
-              disabled={page <= 1}
-            >
+            <Button variant="outline" className="hidden h-8 w-8 p-0 lg:flex bg-zinc-900 border-zinc-800"
+              onClick={() => handlePageChange(1)} disabled={page <= 1}>
               <ChevronsLeft className="h-4 w-4" />
             </Button>
-            <Button
-              variant="outline"
-              className="h-8 w-8 p-0 bg-zinc-900 border-zinc-800"
-              onClick={() => handlePageChange(page - 1)}
-              disabled={page <= 1}
-            >
+            <Button variant="outline" className="h-8 w-8 p-0 bg-zinc-900 border-zinc-800"
+              onClick={() => handlePageChange(page - 1)} disabled={page <= 1}>
               <ChevronLeft className="h-4 w-4" />
             </Button>
-            <Button
-              variant="outline"
-              className="h-8 w-8 p-0 bg-zinc-900 border-zinc-800"
-              onClick={() => handlePageChange(page + 1)}
-              disabled={page >= totalPages}
-            >
+            <Button variant="outline" className="h-8 w-8 p-0 bg-zinc-900 border-zinc-800"
+              onClick={() => handlePageChange(page + 1)} disabled={page >= totalPages}>
               <ChevronRight className="h-4 w-4" />
             </Button>
-            <Button
-              variant="outline"
-              className="hidden h-8 w-8 p-0 lg:flex bg-zinc-900 border-zinc-800"
-              onClick={() => handlePageChange(totalPages)}
-              disabled={page >= totalPages}
-            >
+            <Button variant="outline" className="hidden h-8 w-8 p-0 lg:flex bg-zinc-900 border-zinc-800"
+              onClick={() => handlePageChange(totalPages)} disabled={page >= totalPages}>
               <ChevronsRight className="h-4 w-4" />
             </Button>
           </div>
