@@ -105,6 +105,9 @@ async function searchWorker(workerId: number, queries: string[], seenIds: Set<st
 
   const page: Page = await browserContext.newPage();
 
+  const MAX_CONSEC_ERRORS = 2;
+  let consecErrors = 0;
+
   for (let i = 0; i < queries.length; i++) {
     const query = queries[i]!;
     console.log(`[Worker ${workerId}] [Query ${i + 1}/${queries.length}] 🔍 Google Search: ${query}`);
@@ -122,7 +125,10 @@ async function searchWorker(workerId: number, queries: string[], seenIds: Set<st
 
         await page.waitForURL((url) => !url.href.includes("google.com/sorry"), { timeout: 45000 })
           .then(() => console.log(`[Worker ${workerId}] 🎉 Vượt CAPTCHA thành công!`))
-          .catch(() => console.error(`[Worker ${workerId}] ❌ AI giải CAPTCHA quá thời gian (Timeout).`));
+          .catch((captchaErr: any) => {
+            console.error(`[Worker ${workerId}] ❌ AI giải CAPTCHA quá thời gian (Timeout).`);
+            throw captchaErr; // propagate so catch below counts it as an error
+          });
       }
 
       // Trích xuất toàn bộ liên kết chứa instagram.com/ và /reel/ hoặc /p/ từ Google SERP HTML
@@ -137,6 +143,8 @@ async function searchWorker(workerId: number, queries: string[], seenIds: Set<st
             )
         ));
       });
+
+      consecErrors = 0; // reset on successful page load + extraction
 
       let savedCount = 0;
       for (const link of links) {
@@ -164,7 +172,12 @@ async function searchWorker(workerId: number, queries: string[], seenIds: Set<st
       await page.waitForTimeout(2000);
 
     } catch (err: any) {
-      console.error(`[Worker ${workerId}] Lỗi xử lý query "${query}": ${err.message}`);
+      consecErrors++;
+      console.error(`[Worker ${workerId}] Lỗi xử lý query "${query}" (${consecErrors}/${MAX_CONSEC_ERRORS}): ${err.message}`);
+      if (consecErrors >= MAX_CONSEC_ERRORS) {
+        console.error(`[Worker ${workerId}] Too many consecutive errors — stopping worker.`);
+        break;
+      }
     }
   }
 
@@ -210,5 +223,10 @@ export async function runSearchPipeline() {
 }
 
 
-runSearchPipeline().catch(console.error);
+if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith("gg-advanced-search-scraper.ts")) {
+  runSearchPipeline().catch((err) => {
+    console.error(err);
+    process.exitCode = 1;
+  });
+}
 

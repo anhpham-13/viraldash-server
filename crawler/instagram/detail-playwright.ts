@@ -3,7 +3,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { readJsonLines } from "../src/core/jsonl.js";
-import { withViralMetrics } from "../src/core/viral.calc.js";
+import { withViralMetrics } from "../src/core/viral-calc.js";
 import { env } from "../src/config/env.js";
 
 // ─── Paths ─────────────────────────────────────────────────────────────────────
@@ -229,6 +229,8 @@ async function crawlWorker(
 
     let saved = 0;
     let failed = 0;
+    const MAX_CONSEC_ERRORS = 2;
+    let consecErrors = 0;
 
     while (true) {
         const i = getNext();
@@ -304,7 +306,13 @@ async function crawlWorker(
             if (!item) {
                 console.warn(`[Worker ${workerId}] No data for ${shortCode}.`);
                 failed++;
+                consecErrors++;
+                if (consecErrors >= MAX_CONSEC_ERRORS) {
+                    console.error(`[Worker ${workerId}] Too many consecutive failures — stopping worker.`);
+                    break;
+                }
             } else {
+                consecErrors = 0;
                 const record = mapToRecord(shortCode, row.url, item);
 
                 // ── Write to total_vids_ig.jsonl ───────────────────────────────
@@ -318,11 +326,11 @@ async function crawlWorker(
                     Number.isFinite(postMs) &&
                     (Date.now() - postMs) / 3_600_000 <= env.maxVideoAgeDays * 24
                 ) {
-                    const viralRecord = withViralMetrics(record as any);
-                    if (viralRecord.viral_score >= env.viralScoreThreshold) {
+                    const viralRecord = withViralMetrics(record as any, "instagram");
+                    if (viralRecord.video_phase !== "rejected") {
                         viralRecord.url = viralRecord.url.replace(/\/reel[s]?\//, "/p/");
                         appendFileSync(VIRAL_FILE, `${JSON.stringify(viralRecord)}\n`, "utf8");
-                        viralStatus = ` [VIRAL: ${viralRecord.viral_score}]`;
+                        viralStatus = ` [${viralRecord.video_phase.toUpperCase()}: ${viralRecord.viral_score}]`;
                     }
                 }
 
@@ -337,6 +345,12 @@ async function crawlWorker(
         } catch (err: any) {
             console.error(`[Worker ${workerId}] Error on ${shortCode}: ${err.message}`);
             failed++;
+            consecErrors++;
+            if (consecErrors >= MAX_CONSEC_ERRORS) {
+                console.error(`[Worker ${workerId}] Too many consecutive errors — stopping worker.`);
+                await ctx.close().catch(() => { });
+                return { saved, failed };
+            }
         } finally {
             if (tab) await tab.close().catch(() => { });
         }

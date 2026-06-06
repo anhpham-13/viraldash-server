@@ -3,8 +3,10 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { readJsonLines } from "../src/core/jsonl.js";
-import { withViralMetrics } from "../src/core/viral.calc.js";
+import { withViralMetrics } from "../src/core/viral-calc.js";
 import { env } from "../src/config/env.js";
+import { getDb, ensureIndexes, upsertVideo, syncHashtagsFromVideos } from "../../shared/db/index.js";
+import type { RawCrawlerRecord } from "../../shared/types/index.js";
 
 // ─── Paths ────────────────────────────────────────────────────────────────────
 
@@ -308,6 +310,30 @@ function mapToRecord(
     };
 }
 
+// ─── RawCrawlerRecord normalization ──────────────────────────────────────────
+// Converts InstagramRecord (local type) → canonical shared type for MongoDB.
+// Platform is "Instagram_Reels" (not "Instagram") to match the Platform union.
+function toRawRecord(r: InstagramRecord): RawCrawlerRecord {
+  const soundStr = r.sound.title
+    ? (r.sound.artist ? `${r.sound.title} - ${r.sound.artist}` : r.sound.title)
+    : "";
+  return {
+    video_id:     r.id,
+    platform:     "Instagram_Reels",
+    url:          r.url,
+    published_at: new Date(r.postDate),
+    author:       r.author.username,
+    hashtags:     r.hashtags,
+    ...(soundStr && { sound: soundStr }),
+    view_count:   r.views,
+    likes:        r.likes,
+    comments:     r.comments,
+    shares:       r.shares,
+    saves:        r.saves,
+    fetched_at:   new Date(r.fetchedAt),
+  };
+}
+
 // ─── Utils ────────────────────────────────────────────────────────────────────
 
 function randomDelay(): Promise<void> {
@@ -319,6 +345,16 @@ function randomDelay(): Promise<void> {
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
+    // ── MongoDB init (graceful degradation if not available) ──────────────
+    let mongoAvailable = false;
+    try {
+        const db = await getDb();
+        await ensureIndexes(db);
+        mongoAvailable = true;
+    } catch (err: any) {
+        console.warn(`[MongoDB] Not available — running JSONL-only: ${(err as Error).message}`);
+    }
+
     if (!existsSync(COOKIE_FILE)) {
         throw new Error(`Cookie file not found: ${COOKIE_FILE}`);
     }
@@ -383,15 +419,22 @@ async function main(): Promise<void> {
             appendFileSync(OUTPUT_FILE, `${JSON.stringify(record)}\n`, "utf8");
             savedCount++;
 
+            // Only viral records go to MongoDB
             let viralStatus = "";
             const postMs = new Date(record.postDate).getTime();
             if (Number.isFinite(postMs) && (Date.now() - postMs) / 3_600_000 <= env.maxVideoAgeDays * 24) {
-                const viralRecord = withViralMetrics(record as any);
-                if (viralRecord.viral_score >= env.viralScoreThreshold) {
+                const viralRecord = withViralMetrics(record as any, "instagram");
+                if (viralRecord.video_phase !== "rejected") {
                     // Replace /reel/ or /reels/ with /p/ for better FE display
                     viralRecord.url = viralRecord.url.replace(/\/reel[s]?\//, '/p/');
                     appendFileSync(VIRAL_FILE, `${JSON.stringify(viralRecord)}\n`, "utf8");
-                    viralStatus = ` [VIRAL: ${viralRecord.viral_score}]`;
+                    viralStatus = ` [${viralRecord.video_phase.toUpperCase()}: ${viralRecord.viral_score}]`;
+                    // Only confirmed viral (not seeds) go to MongoDB to avoid score=0 noise.
+                    if (mongoAvailable && viralRecord.video_phase === "viral") {
+                        await upsertVideo(toRawRecord(record)).catch((e: Error) =>
+                            console.warn(`[MongoDB] upsert failed ${shortCode}: ${e.message}`)
+                        );
+                    }
                 }
             }
 
@@ -442,11 +485,12 @@ process.on("SIGINT", () => {
     cleanup();
 });
 
-main().then(() => {
-    cleanup();
-}).catch((err) => {
+main()
+  .then(() => syncHashtagsFromVideos("Instagram_Reels"))
+  .then(() => { cleanup(); })
+  .catch((err) => {
     console.error(err);
     process.exitCode = 1;
     cleanup();
-});
+  });
 

@@ -3,7 +3,7 @@ import { existsSync, appendFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { readJsonLines } from "../src/core/jsonl.js";
-import { withViralMetrics } from "../src/core/viral.calc.js";
+import { withViralMetrics } from "../src/core/viral-calc.js";
 
 const ID_FILTER_FILE = resolve(process.cwd(), "data/instagram/id_filter_ig.jsonl");
 const TOTAL_FILE = resolve(process.cwd(), "data/instagram/total_posts_ig.jsonl");
@@ -78,8 +78,11 @@ export async function runRapidWorker() {
   let index = 0;
   let savedCount = 0;
   let viralSavedCount = 0;
+  const MAX_CONSEC_ERRORS = 2;
 
   const worker = async () => {
+    let consecErrors = 0;
+
     while (index < rows.length) {
       const item = rows[index++];
       const id = String(item?.id ?? "").trim();
@@ -95,6 +98,19 @@ export async function runRapidWorker() {
         await delay(10000);
         payload = await fetchRapidDetail(id);
       }
+
+      if (!payload || !payload.data) {
+        consecErrors++;
+        console.warn(`[RapidEnricher-IG] Still no data for ${id} — consecutive failures: ${consecErrors}/${MAX_CONSEC_ERRORS}`);
+        if (consecErrors >= MAX_CONSEC_ERRORS) {
+          console.error("[RapidEnricher-IG] Too many consecutive failures — stopping worker.");
+          break;
+        }
+        await delay(delayMs);
+        continue;
+      }
+
+      consecErrors = 0;
 
       if (payload && payload.data) {
         const post = payload.data;
@@ -133,8 +149,8 @@ export async function runRapidWorker() {
 
         const postMs = new Date(record.postDate).getTime();
         if (Number.isFinite(postMs) && (Date.now() - postMs) / 3_600_000 <= MAX_POST_AGE_DAYS * 24) {
-          const viralRecord = withViralMetrics(record as any);
-          if (viralRecord.viral_score >= VIRAL_SCORE_THRESHOLD) {
+          const viralRecord = withViralMetrics(record as any, "instagram");
+          if (viralRecord.video_phase !== "rejected") {
             viralRecord.url = viralRecord.url.replace(/\/reel[s]?\//, '/p/');
             appendFileSync(VIRAL_FILE, `${JSON.stringify(viralRecord)}\n`, "utf8");
             viralSavedCount++;
