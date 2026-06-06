@@ -1,3 +1,7 @@
+// ─── Platform & phase enums ───────────────────────────────────────────────────
+export type Platform = "tiktok" | "youtube" | "instagram";
+export type VideoPhase = "viral" | "seed" | "rejected";
+
 // ─── Schema: PRD §2 — Unified Video Record ───────────────────────────────────
 
 export interface IYouTubeVideoRaw {
@@ -32,6 +36,7 @@ export interface IYouTubeVideoScored extends IYouTubeVideoRaw {
   rolling_velocity: number | null;
   viral_acceleration: number | null;
   viral_score: number;
+  video_phase: VideoPhase;
 }
 
 // ─── Schema: loose candidate shape from crawlers ─────────────────────────────
