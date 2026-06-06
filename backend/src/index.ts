@@ -3,7 +3,7 @@ import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
-import { videoStore }    from './lib/cache.js';
+import { getDb, ensureIndexes } from '../../shared/db/index.js';
 import { videosRouter }   from './routes/videos.js';
 import { hashtagsRouter } from './routes/hashtags.js';
 import { statsRouter }    from './routes/stats.js';
@@ -52,12 +52,6 @@ app.get('/health', (c) =>
   c.json({ status: 'ok', timestamp: new Date().toISOString() }),
 );
 
-// Force-refresh the video cache (call after crawler run completes)
-app.post('/cache/reload', async (c) => {
-  await videoStore.reload();
-  return c.json({ ok: true, timestamp: new Date().toISOString() });
-});
-
 // 404 catch-all
 app.notFound((c) => c.json({ error: 'Not found' }, 404));
 
@@ -66,16 +60,13 @@ app.notFound((c) => c.json({ error: 'Not found' }, 404));
 const PORT = parseInt(process.env['PORT'] ?? '4000', 10);
 
 console.log(`[backend] Allowed origins: ${ALLOWED_ORIGINS.join(', ')}`);
-console.log(`[backend] Data dir:        ${process.env['DATA_DIR'] ?? '../data (default)'}`);
 
-// Warm the cache before accepting traffic so the first request is fast
-videoStore.reload()
-  .then(() => {
-    console.log(`[backend] Cache warm — listening on http://localhost:${PORT}`);
-    serve({ fetch: app.fetch, port: PORT });
-  })
-  .catch((err) => {
-    // Start anyway even if data files are missing (returns empty results gracefully)
-    console.error('[backend] Cache warm failed, starting anyway:', err);
-    serve({ fetch: app.fetch, port: PORT });
-  });
+// Start server immediately — MongoDB errors surface per-request as 503
+serve({ fetch: app.fetch, port: PORT });
+console.log(`[backend] Listening on http://localhost:${PORT}`);
+
+// MongoDB init in background — logs success or warning
+getDb()
+  .then(db => ensureIndexes(db))
+  .then(() => console.log('[backend] MongoDB ready'))
+  .catch((err: Error) => console.warn(`[backend] MongoDB unavailable: ${err.message} — routes will return 503`));

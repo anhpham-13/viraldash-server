@@ -1,38 +1,21 @@
 import { Hono } from 'hono';
-import { readJson } from '../lib/data.js';
+import { findByPlatform } from '../../../shared/db/index.js';
+import type { Platform } from '../../../shared/types/index.js';
 
-function normalizePlatform(p: string | undefined): string {
-  const s = (p ?? 'YouTube_Shorts').toLowerCase().replace('_', '');
-  if (s === 'instagram') return 'instagramreels';
-  return s;
-}
+const VALID_PLATFORMS = new Set<Platform>(['YouTube_Shorts', 'TikTok', 'Instagram_Reels']);
 
 export const hashtagsRouter = new Hono();
 
 hashtagsRouter.get('/', async (c) => {
-  const platform = c.req.query('platform') ?? 'all';
+  const raw      = c.req.query('platform') ?? 'all';
+  const platform = VALID_PLATFORMS.has(raw as Platform) ? (raw as Platform) : undefined;
+  const limit    = Math.min(500, Math.max(1, parseInt(c.req.query('limit') ?? '80', 10) || 80));
 
-  const [ytHash, ttHash, igHash] = await Promise.all([
-    readJson('youtube/hashtag_yt.json'),
-    readJson('tiktok/hashtag_tt.json'),
-    readJson('instagram/hashtag_ig.json'),
-  ]);
-
-  const mapPlatform = (arr: any[] | null, plat: string) => 
-    (arr ?? []).map(h => ({ ...h, platform: h.platform || plat }));
-
-  let hashtags = [
-    ...mapPlatform(ytHash as any[], 'YouTube_Shorts'),
-    ...mapPlatform(ttHash as any[], 'TikTok'),
-    ...mapPlatform(igHash as any[], 'Instagram_Reels'),
-  ];
-
-  if (platform !== 'all') {
-    const target = platform.toLowerCase().replace('_', '');
-    hashtags = hashtags.filter(
-      (h) => normalizePlatform(h['platform'] as string | undefined) === target,
-    );
+  try {
+    const data = await findByPlatform(platform, limit);
+    return c.json({ data });
+  } catch (err) {
+    console.error('[hashtags] findByPlatform failed:', err);
+    return c.json({ error: 'Database error' }, 503);
   }
-
-  return c.json({ data: hashtags });
 });
