@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { syncHashtagsFromVideos } from "../../shared/db/index.js";
 
 const INPUT_FILE = "data/youtube/viral_vids_yt.jsonl";
 const OUTPUT_FILE = "data/youtube/hashtag_yt.json";
@@ -249,7 +250,7 @@ function isTooSimilarToSelected(item: TagStat, selected: TagStat[]): boolean {
   return false;
 }
 
-export function runExtractHashtags(): void {
+export async function runExtractHashtags(): Promise<void> {
   fs.mkdirSync(path.dirname(OUTPUT_FILE), { recursive: true });
 
   const videos = readJsonl(INPUT_FILE);
@@ -358,9 +359,18 @@ export function runExtractHashtags(): void {
   }
 
   fs.writeFileSync(OUTPUT_FILE, JSON.stringify(results, null, 2), "utf8");
-
   console.log(`Done. ${results.length} hashtags written to ${OUTPUT_FILE}`);
   console.log(results.slice(0, 40).map((x) => x.query).join(", "));
+
+  // Sync to MongoDB so the frontend can query hashtags by platform + 48h window.
+  try {
+    await syncHashtagsFromVideos("YouTube_Shorts");
+  } catch (err: any) {
+    console.warn(`[extract_hashtags] MongoDB sync failed (non-fatal): ${err.message}`);
+  }
 }
 
-runExtractHashtags();
+runExtractHashtags().catch((err) => {
+  console.error(err);
+  process.exitCode = 1;
+});
