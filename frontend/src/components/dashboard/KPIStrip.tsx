@@ -2,7 +2,6 @@
 
 import { useState, useEffect } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { formatDistanceToNow } from 'date-fns';
 import { api } from '@/lib/api-client';
 import type { Stats } from '@/lib/api-client';
 
@@ -84,6 +83,16 @@ const PLATFORM_LABELS: Record<string, string> = {
   Instagram_Reels: 'Instagram',
 };
 
+function compactAgo(iso: string): string {
+  const diffMs = Date.now() - new Date(iso).getTime();
+  const m = Math.floor(diffMs / 60_000);
+  if (m < 1)  return 'just now';
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
+
 function LastRefreshCard({ data }: { data: Stats['lastRefreshByPlatform'] }) {
   const rows = (Object.keys(PLATFORM_LABELS) as Array<keyof typeof data>).map(key => ({
     label: PLATFORM_LABELS[key],
@@ -97,15 +106,13 @@ function LastRefreshCard({ data }: { data: Stats['lastRefreshByPlatform'] }) {
           Last Refresh
         </CardTitle>
       </CardHeader>
-      <CardContent className="px-4 pb-4 space-y-2">
+      <CardContent className="px-4 pb-4 space-y-2.5">
         {rows.map(({ label, ts }) => (
-          <div key={label} className="flex items-center justify-between">
-            <span className="text-[11px] text-zinc-400">{label}</span>
-            <span className="text-[11px] font-mono text-zinc-200">
-              {ts
-                ? formatDistanceToNow(new Date(ts), { addSuffix: true })
-                : <span className="text-zinc-600">—</span>}
-            </span>
+          <div key={label}>
+            <p className="text-[10px] text-zinc-500 leading-none mb-0.5">{label}</p>
+            <p className="text-[11px] font-mono text-zinc-200 leading-none">
+              {ts ? compactAgo(ts) : <span className="text-zinc-600">—</span>}
+            </p>
           </div>
         ))}
       </CardContent>
