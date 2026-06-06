@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "workspaces": [
+    "shared",
     "backend",
     "frontend"
   ],
@@ -15,11 +16,9 @@
     "backend:typecheck": "npm run typecheck --prefix backend",
     "yt:dev": "tsx watch crawler/youtube/index.ts",
     "yt:search": "tsx crawler/youtube/flow1-google-search.ts",
+    "yt:serper": "tsx crawler/youtube/gg-advanced-search-scraper.ts",
     "yt:hashtag": "tsx crawler/youtube/flow2-hashtag-expand.ts",
     "yt:channel": "tsx crawler/youtube/flow3-channel-expand.ts",
-    "flow:google-search": "tsx crawler/youtube/flow1-google-search.ts",
-    "flow:hashtag-expand": "tsx crawler/youtube/flow2-hashtag-expand.ts",
-    "flow:channel-expand": "tsx crawler/youtube/flow3-channel-expand.ts",
     "google-scout": "tsx crawler/youtube/google-shorts-scout.ts",
     "google-flow": "tsx crawler/youtube/google-flow-orchestrator.ts",
     "process-ssr": "tsx crawler/youtube/process_ssr.ts",
@@ -40,8 +39,17 @@
     "ig:detail": "tsx crawler/instagram/detail-playwright.ts",
     "ig:rapid": "tsx crawler/instagram/rapid-instagram.ts",
     "ig:hashtags": "tsx crawler/instagram/extract_hashtags.ts",
-    "migrate:yt-dry": "tsx crawler/scripts/migrate-yt-data.ts",
-    "migrate:yt-apply": "tsx crawler/scripts/migrate-yt-data.ts --apply",
+    "yt:refresh":     "tsx crawler/youtube/meta-refresh-yt.ts",
+    "tt:refresh":     "tsx crawler/tiktok/meta-refresh-tt.ts",
+    "ig:refresh":     "tsx crawler/instagram/meta-refresh-ig.ts",
+    "refresh:all":    "npm run yt:refresh && npm run tt:refresh && npm run ig:refresh",
+    "migrate:dry":    "tsx crawler/scripts/migrate-jsonl-to-mongo.ts",
+    "migrate:apply":  "tsx crawler/scripts/migrate-jsonl-to-mongo.ts --apply",
+    "migrate:yt":     "tsx crawler/scripts/migrate-jsonl-to-mongo.ts --apply --platform=yt",
+    "migrate:tt":     "tsx crawler/scripts/migrate-jsonl-to-mongo.ts --apply --platform=tt",
+    "migrate:ig":     "tsx crawler/scripts/migrate-jsonl-to-mongo.ts --apply --platform=ig",
+    "fix-accel:dry":  "tsx crawler/scripts/fix-accel-snapshot2.ts",
+    "fix-accel":      "tsx crawler/scripts/fix-accel-snapshot2.ts --apply",
     "frontend:dev": "npm run dev   --prefix frontend",
     "frontend:build": "npm run build --prefix frontend",
     "frontend:start": "npm run start --prefix frontend",
@@ -59,6 +67,7 @@
   "dependencies": {
     "dotenv": "^17.4.2",
     "instagram-private-api": "^1.46.1",
+    "mongodb": "^7.2.0",
     "playwright-extra": "^4.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2"
   }

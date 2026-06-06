@@ -1,19 +1,19 @@
 # ViralScope — Monorepo
 
-Three independent crawler pipelines write to a shared `data/` directory; the backend reads from it and the frontend renders it.
+Three independent crawler pipelines write discovered videos into MongoDB; the backend reads from it and the frontend renders it.
 
 ```
 crawl_short_video/
 ├── crawler/
-│   ├── src/          ← shared library (types, viral formula, I/O utils, base worker)
-│   ├── youtube/      ← YouTube Shorts crawl pipeline
-│   ├── tiktok/       ← TikTok crawl pipeline
-│   ├── instagram/    ← Instagram Reels crawl pipeline
-│   ├── scripts/      ← one-off data-migration utilities
-│   └── extensions/   ← browser extension loaded by Playwright
+│   ├── src/          ← shared crawler library (types, viral formula, I/O helpers, base classes)
+│   ├── youtube/      ← YouTube Shorts pipeline (3 discovery flows)
+│   ├── tiktok/       ← TikTok pipeline (2 discovery sources × 2 enrichment strategies)
+│   ├── instagram/    ← Instagram Reels pipeline (4 phases)
+│   └── scripts/      ← one-off data-migration utilities
+├── shared/           ← TypeScript types + MongoDB repository (imported by backend)
 ├── backend/          ← Hono REST API (serves the frontend)
-├── frontend/         ← Next.js dashboard UI
-└── data/             ← shared JSONL output (never committed)
+├── frontend/         ← Next.js 14 dashboard UI
+└── data/             ← audit JSONL logs (never committed; written by crawlers for debugging)
     ├── youtube/
     ├── tiktok/
     └── instagram/
@@ -21,219 +21,316 @@ crawl_short_video/
 
 ---
 
-## `crawler/src/` — Shared library
+## Workspaces
 
-All three platform pipelines import from here. **No platform-specific code lives here.**
+| Workspace | Role |
+|-----------|------|
+| `crawler/` | Data collection — discovers video IDs, enriches with platform APIs, scores, writes to MongoDB |
+| `shared/` | Canonical types (`VideoDocument`, `VideoSnapshot`) + MongoDB client + `upsertVideo` / `pushSnapshot` / `queryVideos` |
+| `backend/` | Hono 4 REST API — queries MongoDB via `shared/`, returns paginated & filtered data |
+| `frontend/` | Next.js 14 dashboard — reads from backend API, no direct DB access |
+
+---
+
+## Data Flow
+
+```
+┌──────────────────────────────────────────┐
+│         Loop 1 — Discovery               │
+│  YouTube / TikTok / Instagram crawlers   │
+│  (Google SERP, platform APIs, RSS)       │
+└───────────────┬──────────────────────────┘
+                │ upsertVideo()
+                ▼
+        ┌───────────────┐     audit JSONL
+        │   MongoDB     │ ←── (data/*/audit_*.jsonl)
+        │  videos col.  │
+        └───────┬───────┘
+                │ pushSnapshot()
+┌───────────────▼──────────────────────────┐
+│         Loop 2 — Refresh                 │
+│  meta-refresh-yt/tt/ig.ts                │
+│  Re-fetch stats every REFRESH_INTERVAL   │
+│  Appends VideoSnapshot → videos.snapshots│
+└───────────────┬──────────────────────────┘
+                │ queryVideos()
+                ▼
+        ┌───────────────┐
+        │  Backend API  │  :4000
+        │  /api/videos  │
+        └───────┬───────┘
+                │
+        ┌───────▼───────┐
+        │   Frontend    │  :3000
+        │  Dashboard    │
+        └───────────────┘
+```
+
+---
+
+## MongoDB Document Model
+
+Every video is stored as a single document with an append-only `snapshots[]` array.
+
+```typescript
+VideoDocument {
+  video_id, platform, url, published_at, author, hashtags, sound?
+  first_seen_at, last_refreshed_at, snapshot_count
+  view_count, likes, comments, shares, saves   // mirror of latest snapshot
+  engagement_score, viral_score                // pre-computed on last refresh
+  viral_acceleration: number | null            // null until snapshot_count ≥ 3
+  snapshots: VideoSnapshot[]                   // append-only history
+}
+
+VideoSnapshot {
+  ts, view_count, likes, comments, shares, saves
+  delta_views, delta_hours
+  rolling_velocity   // delta_views / delta_hours  (0 on first snapshot)
+  engagement_score, viral_score
+}
+```
+
+**Velocity rules:**
+- `viral_velocity` displayed in the API = `snapshots[-1].rolling_velocity` (real incremental speed between last two refreshes). Falls back to `view_count / age_at_crawl` for the first snapshot.
+- `viral_acceleration` = `vNow − vPrev`. Requires `prevSnap.delta_hours > 0`, meaning it's `null` until the **3rd snapshot**.
+
+---
+
+## `crawler/src/` — Shared crawler library
 
 | File | Purpose |
 |------|---------|
-| `core/types.ts` | Shared TypeScript interfaces |
-| `core/viral.calc.ts` | Viral score / engagement / velocity formulae |
+| `core/viral-calc.ts` | Two-phase scoring: seed (age ≤ 2h) → score 1–20; viral (age > 2h) → platform gate → score 21–100 |
+| `core/base-worker.ts` | Abstract `BaseWorker` collect/run pattern |
+| `core/meta-refresh-base.ts` | Base class for refresh loops (calls `pushSnapshot`) |
+| `core/seen-index.ts` | File-backed sharded dedup index |
 | `core/jsonl.ts` | JSONL read / write / append helpers |
-| `core/seenIndex.ts` | File-backed deduplication index |
-| `core/stream-dedup.ts` | Streaming deduplication pipeline |
-| `core/base.worker.ts` | Abstract base class for scrape workers |
-| `config/env.ts` | Shared environment variable loader |
+| `core/types.ts` | Shared crawler TypeScript interfaces |
+| `config/env.ts` | Environment variable loader |
+
+> **Backwards-compat shims:** `base.worker.ts`, `viral.calc.ts`, `seenIndex.ts` re-export from the renamed files above. Do not remove them.
 
 ---
 
 ## `crawler/youtube/` — YouTube pipeline
 
-Mirrors the `tiktok/` folder structure. All scripts run via `tsx` from the project root.
+Three independent discovery flows, all converging on the same enrichment + MongoDB write step.
 
-| File | Role |
-|------|------|
-| `index.ts` | Main entry — starts the Google Playwright worker |
-| `google-worker.ts` | `BaseWorker` subclass: Google Stealth Scraper + YT Data API enrichment |
-| `polyfills.ts` | Node.js polyfills (File API) required by Playwright |
-| `flow1-google-search.ts` | **Flow 1** — Google search → id list → enrich → `viral_vids_yt.jsonl` |
-| `flow2-hashtag-expand.ts` | **Flow 2** — Mine hashtags from existing viral videos → crawl by hashtag |
-| `flow3-channel-expand.ts` | **Flow 3** — Expand via channel RSS feeds (SSR) |
-| `google-shorts-scout.ts` | Playwright stealth scraper (alphabet-matrix Google queries) |
-| `google-flow-orchestrator.ts` | Orchestrate search + scoring in one pass |
-| `crawl_api_v3_shorts.ts` | YouTube Data API v3 search by hashtag |
-| `extract_hashtags.ts` | Mine top hashtags from existing viral video records |
-| `filter-google-ids.ts` | Deduplicate raw IDs → `id_filter_yt.jsonl` |
-| `process-id-filter-to-total.ts` | Enrich IDs with YT Data API → `total_vids_yt.jsonl` + `viral_vids_yt.jsonl` |
-| `process_ssr.ts` | Fetch channel RSS feeds, extract recent Shorts IDs |
-| `recalculate_viral.ts` | Recompute viral scores on existing data without re-crawling |
+| Script | npm run | Role |
+|--------|---------|------|
+| `flow1-google-search.ts` | `yt:search` | **Primary daily run** — Google SERP scraping → dedup → enrich |
+| `flow2-hashtag-expand.ts` | `yt:hashtag` | Hashtag-driven YT Search API expansion |
+| `flow3-channel-expand.ts` | `yt:channel` | Channel RSS feeds (zero API quota) |
+| `google-shorts-scout.ts` | `google-scout` | Standalone Playwright alphabet-matrix scraper |
+| `filter-google-ids.ts` | `filter-id` | Deduplication step (shared by all flows) |
+| `process-id-filter-to-total.ts` | `process-total` | YT Data API v3 enrichment → `upsertVideo()` → MongoDB |
+| `process_ssr.ts` | `process-ssr` | Channel RSS feed scraper (Flow 3 step 1) |
+| `extract_hashtags.ts` | _(standalone)_ | Mine top hashtags from viral videos |
+| `recalculate_viral.ts` | _(standalone)_ | Re-score existing data without API calls |
+| `meta-refresh-yt.ts` | `yt:refresh` | **Refresh loop** — re-fetches stats, calls `pushSnapshot()` |
+| `google-flow-orchestrator.ts` | `google-flow` | Legacy all-in-one; prefer `yt:search` |
+
+See [`crawler/youtube/workers-README.md`](crawler/youtube/workers-README.md) for detailed component docs.
 
 ---
 
 ## `crawler/tiktok/` — TikTok pipeline
 
-| File | Role |
-|------|------|
-| `index.ts` | Run all TikTok steps in sequence |
-| `rapid.worker.ts` | Fetch TikTok video data via RapidAPI |
-| `google.worker.ts` | Discover TikTok video IDs via Google search |
-| `filter-google-ids-tt.ts` | Deduplicate raw IDs → `id_filter_tt.jsonl` |
-| `process-id-filter-to-total-tt.ts` | Enrich IDs with Playwright → `total_vids_tt.jsonl` |
-| `normalize.ts` | Normalise field names across API sources |
-| `aggregator.ts` | Compute viral scores + hashtag leaderboard |
-| `config/env.ts` | TikTok-specific env vars (RAPIDAPI_KEY, etc.) |
-| `workers/source.types.ts` | Raw API response types |
+| Script | npm run | Role |
+|--------|---------|------|
+| `google.worker.ts` | `tiktok:google` | Discovery via Serper API (no browser) |
+| `gg-advanced-search-scraper.ts` | _(standalone)_ | Playwright Google scraper |
+| `filter-google-ids-tt.ts` | `tiktok:filter-id` | Deduplication |
+| `process-id-filter-to-total-tt.ts` | `tiktok:process-total` | Playwright enrichment → `upsertVideo()` |
+| `rapid.worker.ts` | `tiktok:rapid` | RapidAPI enrichment alternative |
+| `meta-refresh-tt.ts` | `tt:refresh` | **Refresh loop** — calls `pushSnapshot()` |
+| `aggregator.ts` | `tiktok:aggregate` | _(experimental pipeline 2)_ Re-score utility |
+| `normalize.ts` | `tiktok:normalize` | _(experimental)_ Cross-source normaliser |
+| `index.ts` | `tiktok:all` | _(experimental)_ End-to-end orchestrator, NOT production |
+
+See [`crawler/tiktok/worker-README.md`](crawler/tiktok/worker-README.md) for full docs.
 
 ---
 
-## `crawler/instagram/` — Instagram pipeline
-
-A 4-phase pipeline for discovering and enriching trending Instagram Reels. See [`crawler/instagram/README.md`](crawler/instagram/README.md) for full documentation.
+## `crawler/instagram/` — Instagram pipeline (4 phases)
 
 ```
-Phase 0 ─ Auth        Capture a live session cookie via Playwright
-Phase 1 ─ Discovery   Google scraping → raw Reel IDs & URLs
-Phase 2 ─ Filter      Deduplication → id_filter_ig.jsonl
-Phase 3 ─ Enrichment  Instagram private API / RapidAPI → full metadata
-Phase 4 ─ Analysis    Hashtag scoring → hashtag_ig.json
+Phase 0  Auth        get_instagram_cookie.ts  — capture live session cookie
+Phase 1  Discovery   gg-advanced-search-scraper.ts  (Playwright, no API key)
+                     serper-search.ts          (Serper API)
+Phase 2  Filter      filter-google-ids-ig.ts   — deduplication
+Phase 3  Enrichment  crawl_instagram_via_private_api.ts  (native fetch, fastest)
+                     detail-playwright.ts       (5 parallel workers, most reliable)
+                     rapid-instagram.ts         (RapidAPI, no cookie)
+Phase 4  Analysis    extract_hashtags.ts        — hashtag scoring
 ```
 
-| File | Phase | Role |
-|------|-------|------|
-| `get_instagram_cookie.ts` | 0 | Open a real browser, log in manually, save session to `cookie.json` |
-| `gg-advanced-search-scraper.ts` | 1a | Playwright Google scraper — alphabet-matrix queries, noCaptcha AI extension |
-| `serper-search.ts` | 1b | Serper API Google scraper — intent + category query matrix |
-| `filter-google-ids-ig.ts` | 2 | Deduplicate against already-processed IDs → `id_filter_ig.jsonl` |
-| `crawl_instagram_via_private_api.ts` | 3a | Native `fetch` enricher using session cookies (fastest) |
-| `detail-playwright.ts` | 3b | Playwright browser enricher — 5 parallel workers, most reliable |
-| `rapid-instagram.ts` | 3c | RapidAPI enricher — no session cookie needed |
-| `extract_hashtags.ts` | 4 | Weighted hashtag scorer → `hashtag_ig.json` |
-| `debug-network.ts` | — | Dev tool: intercept all IG API responses for a single reel |
+Active refresh: `ig:refresh` → `meta-refresh-ig.ts` → `pushSnapshot()`
+
+See [`crawler/instagram/README.md`](crawler/instagram/README.md) for full docs.
 
 ---
 
-## Running the crawlers
+## `crawler/scripts/` — Migration utilities
 
-### Setup
+| Script | npm run | Purpose |
+|--------|---------|---------|
+| `migrate-jsonl-to-mongo.ts` | `migrate:dry` / `migrate:apply` | Import audit JSONL files into MongoDB |
+| `fix-accel-snapshot2.ts` | `fix-accel:dry` / `fix-accel` | Reset `viral_acceleration = null` for docs with `snapshot_count ≤ 2` |
+
+---
+
+## Setup
 
 ```bash
-# from project root
-cp .env.example .env
-# fill in API keys — see .env.example for all variables
+# 1. Install all workspace dependencies
 npm install
 
-# install Playwright browsers (one-time)
+# 2. Install Playwright browsers (one-time, needed for browser-based crawlers)
 npx playwright install chromium
+
+# 3. Configure environment
+cp .env.example .env
+# Required minimum:
+#   MONGODB_URI=mongodb://localhost:27017
+#   MONGODB_DB=viralscope
+#   YOUTUBE_DATA_API_KEY=...   (for YouTube crawlers)
+#   RAPID_API_HOST / RAPID_API_KEYS  (for TikTok RapidAPI)
+#   SERPER_API_KEYS=...        (for Instagram/TikTok Serper discovery)
 ```
+
+---
+
+## Running
 
 ### YouTube
 
 ```bash
-# Flow 1 — Google search → score → viral_vids_yt.jsonl  (primary daily run)
-npm run yt:search
-
-# Flow 2 — Hashtag-driven crawl (run after Flow 1 has data)
-npm run yt:hashtag
-
-# Flow 3 — Channel RSS expansion
-npm run yt:channel
-
-# Individual steps
-npm run google-scout      # Playwright Google scraper only
-npm run google-flow       # Google search + scoring in one pass
-npm run process-ssr       # Channel RSS feed scraper
-npm run filter-id         # Deduplicate raw IDs
-npm run process-total     # Enrich IDs via YouTube Data API
-
-# Shared-lib type check
-npm run check
+npm run yt:search       # Flow 1 — Google SERP → enrich → MongoDB (primary daily run)
+npm run yt:hashtag      # Flow 2 — hashtag expansion (requires prior data)
+npm run yt:channel      # Flow 3 — channel RSS (zero API quota)
+npm run yt:refresh      # Refresh loop — re-fetch stats, push snapshots
 ```
 
 ### TikTok
 
 ```bash
-npm run tiktok:all            # Run all TikTok steps in sequence
-
-# Individual steps
-npm run tiktok:rapid          # RapidAPI fetch
-npm run tiktok:google         # Google-search discovery
-npm run tiktok:filter-id      # Deduplicate IDs
-npm run tiktok:process-total  # Playwright enrichment
-npm run tiktok:normalize      # Normalise field names
-npm run tiktok:aggregate      # Compute viral scores + hashtag leaderboard
+npm run tiktok:google         # Discovery via Serper API
+npm run tiktok:filter-id      # Dedup
+npm run tiktok:process-total  # Enrich via Playwright → MongoDB
+# or:
+npm run tiktok:rapid          # Enrich via RapidAPI → MongoDB
+npm run tt:refresh            # Refresh loop
 ```
 
 ### Instagram
 
 ```bash
-# Step 0 — capture a live session cookie (run once, or when cookies expire)
-npm run ig:cookie
+npm run ig:cookie      # Phase 0 — capture session cookie (run once or on expiry)
+npm run ig:search      # Phase 1 — discovery (Playwright, no API key)
+npm run ig:filter      # Phase 2 — dedup
+npm run ig:detail      # Phase 3 — enrich (Playwright, 5 workers)
+npm run ig:hashtags    # Phase 4 — score hashtags
+npm run ig:refresh     # Refresh loop
+```
 
-# Phase 1 — discover Reel IDs (choose one or run both)
-npm run ig:search     # Playwright Google scraper (no API key required)
-npm run ig:serper     # Serper API Google scraper (requires SERPER_API_KEYS)
+### Refresh all platforms
 
-# Phase 2 — deduplicate and build the crawl queue
-npm run ig:filter
-
-# Phase 3 — enrich with full metadata (choose one strategy)
-npm run ig:enrich     # Native fetch + session cookie (fastest)
-npm run ig:detail     # Playwright browsers, 5 parallel workers (most reliable)
-npm run ig:rapid      # RapidAPI (no session cookie needed, requires RAPID_API_IG_KEYS)
-
-# Phase 4 — score and rank trending hashtags
-npm run ig:hashtags
+```bash
+npm run refresh:all    # yt:refresh → tt:refresh → ig:refresh (sequential)
 ```
 
 ---
 
 ## Backend
 
-Hono REST API. Reads from `data/` via a 2-minute in-memory cache.
+Hono REST API — reads from MongoDB via `shared/db/`.
 
 ```bash
-cd backend
-cp .env.example .env
-# ALLOWED_ORIGINS=http://localhost:3000
-# DATA_DIR=../data     (relative to backend/, default)
-# PORT=4000
-npm install
-npm run dev      # tsx watch
-npm run build    # tsc → dist/
-npm start        # node dist/index.js
+# from project root:
+npm run backend:dev    # tsx watch  →  http://localhost:4000
+npm run backend:build  # tsc → dist/
+npm run backend:start  # node dist/backend/src/index.js
 ```
 
-### Endpoints
+### API Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/videos` | Paginated, filtered, sorted video list |
+| GET | `/api/videos/:videoId/snapshots?platform=` | Snapshot history for a single video |
 | GET | `/api/hashtags` | Hashtag leaderboard |
-| GET | `/api/stats` | Aggregated KPI metrics |
+| GET | `/api/stats` | Aggregated KPIs (+ `lastRefreshByPlatform`) |
 | GET | `/api/alerts` | Hockey-stick, resurgence, pipeline health |
 | GET | `/health` | Liveness probe |
-| POST | `/cache/reload` | Force-refresh in-memory cache |
+
+### `/api/videos` query params
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `platform` | `YouTube_Shorts` \| `TikTok` \| `Instagram_Reels` \| `all` | Platform filter |
+| `status` | `Emerging` \| `Trending` \| `Viral` \| `Declining` \| `all` | Status filter |
+| `sort` | `viral_score` \| `viral_velocity` \| `view_count` \| `engagement_score` \| `viral_acceleration` \| `age_hours` \| `last_refreshed_at` \| `snapshot_count` | Sort field (default: `viral_score`) |
+| `dir` | `asc` \| `desc` | Sort direction (default: `desc`) |
+| `page` / `limit` | number | Pagination (max limit: 200) |
+| `minScore` / `maxScore` | number | Viral score range |
+| `minViews` / `maxViews` | number | View count range |
+| `minVelocity` / `maxVelocity` | number | Velocity range (views/hour) |
+| `minAge` / `maxAge` | number | Age range in hours |
+| `minSnapshots` / `maxSnapshots` | number | Snapshot count range |
+| `isNew` | number | First seen within N hours |
+| `query` | string | Text search (title, author, hashtags) |
 
 ---
 
 ## Frontend
 
-Next.js 15 dashboard. All data via `src/lib/api-client.ts` — no filesystem access.
+Next.js 14 dashboard.
 
 ```bash
-cd frontend
-echo "NEXT_PUBLIC_API_URL=http://localhost:4000" > .env.local
-npm install
-npm run dev    # :3000
-npm run build
-npm start
+# from project root:
+npm run frontend:dev    # http://localhost:3000
+npm run frontend:build
+npm run frontend:start
 ```
+
+Set API URL in `frontend/.env.local`:
+```
+NEXT_PUBLIC_API_URL=http://localhost:4000
+```
+
+### Components
+
+| Component | File | Description |
+|-----------|------|-------------|
+| `KPIStrip` | `dashboard/KPIStrip.tsx` | Top KPI cards including viral thresholds, counts, and **last refresh time per platform** |
+| `ViralTable` | `dashboard/ViralTable.tsx` | Sortable/filterable video table |
+| `VideoDrawer` | `dashboard/VideoDrawer.tsx` | Detail panel with core metrics, **snapshot timeline**, tags |
+| `AlertFeed` | `dashboard/AlertFeed.tsx` | Hockey-stick and resurgence alerts |
+| `DashboardClient` | `dashboard/DashboardClient.tsx` | Client-side data container |
 
 ---
 
-## Running everything locally
+## Running Everything Locally
 
 ```bash
-# Terminal 1 — run a crawl to populate data/
-npm run yt:search          # YouTube
-# or: npm run tiktok:all   # TikTok
-# or: npm run ig:detail    # Instagram (requires cookie.json from ig:cookie)
+# Terminal 1 — crawl to populate MongoDB
+npm run yt:search
 
 # Terminal 2 — backend API
-cd backend && npm run dev
+npm run backend:dev
 
-# Terminal 3 — frontend dashboard
-cd frontend && npm run dev
+# Terminal 3 — frontend
+npm run frontend:dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000).
+
+---
+
+## TypeScript
+
+```bash
+npm run check                 # root tsconfig (shared + crawler types)
+npm run backend:typecheck     # backend only
+```
