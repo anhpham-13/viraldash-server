@@ -215,7 +215,7 @@ function serperSearchRequest(
     },
   };
 
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const req = https.request(options, (res) => {
       let body = "";
 
@@ -225,6 +225,10 @@ function serperSearchRequest(
 
       res.on("end", () => {
         try {
+          // 429/401/403 = API key exhausted or blocked → signal caller to stop
+          if (res.statusCode === 429 || res.statusCode === 401 || res.statusCode === 403) {
+            return reject(new Error(`Serper HTTP ${res.statusCode} — API key limit or auth failure`));
+          }
           if (res.statusCode && res.statusCode >= 400) {
             console.warn(`[Serper] HTTP ${res.statusCode}: ${body.slice(0, 300)}`);
             return resolve([]);
@@ -242,8 +246,7 @@ function serperSearchRequest(
     });
 
     req.on("error", (err) => {
-      console.warn(`[Serper] Request failed: ${err.message}`);
-      resolve([]);
+      reject(err);
     });
 
     req.write(postData);
@@ -261,13 +264,16 @@ export async function runGoogleWorker() {
   const queries = buildQueries();
   const seen = new Set<string>();
 
-  let keyIndex = 0;
-  let savedCount = 0;
+  let keyIndex    = 0;
+  let savedCount  = 0;
+  let consecErrors = 0;
+  const MAX_CONSEC_ERRORS = 2;
 
   console.log(`[GoogleWorker] Market: US`);
   console.log(`[GoogleWorker] Total queries: ${queries.length}`);
   console.log(`[GoogleWorker] Max pages per query: ${MAX_PAGES}`);
 
+  outer:
   for (const query of queries) {
     for (let page = 1; page <= MAX_PAGES; page++) {
       const apiKey = SERPER_API_KEYS[keyIndex % SERPER_API_KEYS.length]!;
@@ -275,7 +281,20 @@ export async function runGoogleWorker() {
 
       console.log(`[GoogleWorker] Query: "${query}" | page=${page}`);
 
-      const results = await serperSearchRequest(apiKey, query, page);
+      let results: SerperItem[];
+      try {
+        results = await serperSearchRequest(apiKey, query, page);
+        consecErrors = 0;
+      } catch (err: any) {
+        consecErrors++;
+        console.warn(`[GoogleWorker] API error (${consecErrors}/${MAX_CONSEC_ERRORS}): ${err.message}`);
+        if (consecErrors >= MAX_CONSEC_ERRORS) {
+          console.error("[GoogleWorker] Too many consecutive API errors — stopping early.");
+          break outer;
+        }
+        await sleep(DELAY_MS * 3);
+        continue;
+      }
 
       let added = 0;
 
@@ -308,7 +327,9 @@ export async function runGoogleWorker() {
   );
 }
 
-runGoogleWorker().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith("google.worker.ts")) {
+  runGoogleWorker().catch((err) => {
+    console.error(err);
+    process.exitCode = 1;
+  });
+}

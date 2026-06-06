@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { chromium } from "playwright-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import { readJsonLines, writeJsonLines } from "../src/core/jsonl.js";
-import { withViralMetrics } from "../src/core/viral.calc.js";
+import { withViralMetrics } from "../src/core/viral-calc.js";
 import { env } from "../src/config/env.js";
 
 chromium.use(StealthPlugin());
@@ -158,11 +158,11 @@ async function refreshViralVids(): Promise<void> {
         platform: "TikTok",
         ...(createTime ? { postDate: createTime } : {}),
         hashtags: tags.length ? tags : existing.hashtags,
-        views: stats?.playCount ?? existing.views ?? 0,
-        likes: stats?.diggCount ?? existing.likes ?? 0,
-        comments: stats?.commentCount ?? existing.comments ?? 0,
-        saves: stats?.collectCount ?? existing.saves ?? 0,
-        shares: stats?.shareCount ?? existing.shares ?? 0,
+        views: Number(stats?.playCount) || existing.views || 0,
+        likes: Number(stats?.diggCount) || existing.likes || 0,
+        comments: Number(stats?.commentCount) || existing.comments || 0,
+        saves: Number(stats?.collectCount) || existing.saves || 0,
+        shares: Number(stats?.shareCount) || existing.shares || 0,
         url: seed.url || existing.url,
         fetchedAt: new Date().toISOString(),
         sound,
@@ -196,8 +196,8 @@ async function refreshViralVids(): Promise<void> {
     const postMs = new Date(row.postDate ?? "").getTime();
     if (!Number.isFinite(postMs) || (Date.now() - postMs) / 3_600_000 > env.maxVideoAgeDays * 24) continue;
 
-    const scored = withViralMetrics(row);
-    if (scored.viral_score >= env.viralScoreThreshold) viralRecords.push(scored);
+    const scored = withViralMetrics(row, "tiktok");
+    if (scored.video_phase !== "rejected") viralRecords.push(scored);
   }
 
   await writeJsonLines(VIRAL_FILE, viralRecords);

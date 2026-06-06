@@ -3,7 +3,7 @@ import { existsSync, appendFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { readJsonLines } from "../src/core/jsonl.js";
-import { withViralMetrics } from "../src/core/viral.calc.js";
+import { withViralMetrics } from "../src/core/viral-calc.js";
 import { env } from "./config/env.js";
 
 const ID_FILTER_FILE = resolve(process.cwd(), "data/tiktok/id_filter_tt.jsonl");
@@ -72,8 +72,11 @@ export async function runRapidWorker() {
   let index = 0;
   let savedCount = 0;
   let viralSavedCount = 0;
+  const MAX_CONSEC_ERRORS = 2;
 
   const worker = async () => {
+    let consecErrors = 0;
+
     while (index < rows.length) {
       const item = rows[index++];
       const id = String(item?.id ?? "").trim();
@@ -89,6 +92,19 @@ export async function runRapidWorker() {
         await delay(10000);
         payload = await fetchRapidDetail(id);
       }
+
+      if (!payload || !payload.aweme_detail) {
+        consecErrors++;
+        console.warn(`[RapidEnricher] Still no data for ${id} — consecutive failures: ${consecErrors}/${MAX_CONSEC_ERRORS}`);
+        if (consecErrors >= MAX_CONSEC_ERRORS) {
+          console.error("[RapidEnricher] Too many consecutive failures — stopping worker.");
+          break;
+        }
+        await delay(delayMs);
+        continue;
+      }
+
+      consecErrors = 0;
 
       if (payload && payload.aweme_detail) {
         const aweme = payload.aweme_detail;
@@ -111,11 +127,11 @@ export async function runRapidWorker() {
           platform: "TikTok",
           postDate: createTime,
           hashtags: tags,
-          views: stats?.play_count ?? 0,
-          likes: stats?.digg_count ?? 0,
-          comments: stats?.comment_count ?? 0,
-          saves: stats?.collect_count ?? 0,
-          shares: stats?.share_count ?? 0,
+          views: Number(stats?.play_count) || 0,
+          likes: Number(stats?.digg_count) || 0,
+          comments: Number(stats?.comment_count) || 0,
+          saves: Number(stats?.collect_count) || 0,
+          shares: Number(stats?.share_count) || 0,
           total_view_growth: 0,
           url: item.url || `https://www.tiktok.com/@${aweme.author?.unique_id || author || "user"}/video/${id}`,
           fetchedAt: new Date().toISOString(),
@@ -129,8 +145,8 @@ export async function runRapidWorker() {
         // Calculate viral metrics and append immediately
         const postMs = new Date(record.postDate || new Date().toISOString()).getTime();
         if (Number.isFinite(postMs) && (Date.now() - postMs) / 3_600_000 <= env.maxVideoAgeDays * 24) {
-          const viralRecord = withViralMetrics(record);
-          if (viralRecord.viral_score >= env.viralScoreThreshold) {
+          const viralRecord = withViralMetrics(record, "tiktok");
+          if (viralRecord.video_phase !== "rejected") {
             appendFileSync(VIRAL_FILE, `${JSON.stringify(viralRecord)}\n`, "utf8");
             viralSavedCount++;
           }

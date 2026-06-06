@@ -3,8 +3,10 @@ import { resolve } from "node:path";
 import { chromium } from "playwright-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import { readJsonLines, writeJsonLines } from "../src/core/jsonl.js";
-import { withViralMetrics } from "../src/core/viral.calc.js";
+import { withViralMetrics } from "../src/core/viral-calc.js";
 import { env } from "../src/config/env.js";
+import { getDb, ensureIndexes, upsertVideo } from "../../shared/db/index.js";
+import type { RawCrawlerRecord } from "../../shared/types/index.js";
 
 chromium.use(StealthPlugin());
 
@@ -19,6 +21,31 @@ interface TikTokItemStruct {
   music?: { id?: string; title?: string; authorName?: string };
   desc?: string;
   challenges?: Array<{ title?: string }>;
+}
+
+// ─── RawCrawlerRecord normalization ──────────────────────────────────────────
+function toRawRecord(
+  id: string,
+  url: string,
+  detail: TikTokItemStruct,
+  stats: { views: number; likes: number; comments: number; shares: number; saves: number; hashtags: string[]; sound: string },
+): RawCrawlerRecord {
+  const now = new Date();
+  return {
+    video_id:     id,
+    platform:     "TikTok",
+    url,
+    published_at: detail.createTime ? new Date(detail.createTime * 1000) : now,
+    author:       String(detail.author?.uniqueId || "").trim() || "TikTok",
+    hashtags:     stats.hashtags,
+    ...(stats.sound && { sound: stats.sound }),
+    view_count:   stats.views,
+    likes:        stats.likes,
+    comments:     stats.comments,
+    shares:       stats.shares,
+    saves:        stats.saves,
+    fetched_at:   now,
+  };
 }
 
 async function fetchPageDetail(videoId: string, username: string): Promise<TikTokItemStruct | null> {
@@ -82,6 +109,16 @@ async function fetchPageDetail(videoId: string, username: string): Promise<TikTo
 }
 
 export async function runProcessIdFilterToTotal(): Promise<void> {
+  // ── MongoDB init (graceful degradation if not available) ─────────────────
+  let mongoAvailable = false;
+  try {
+    const db = await getDb();
+    await ensureIndexes(db);
+    mongoAvailable = true;
+  } catch (err: any) {
+    console.warn(`[MongoDB] Not available — running JSONL-only: ${(err as Error).message}`);
+  }
+
   if (!existsSync(ID_FILTER_FILE)) {
     throw new Error(`Input file not found: ${ID_FILTER_FILE}`);
   }
@@ -102,8 +139,11 @@ export async function runProcessIdFilterToTotal(): Promise<void> {
   let index = 0;
   let savedCount = 0;
   let viralSavedCount = 0;
+  const MAX_CONSEC_ERRORS = 2;
 
   const worker = async () => {
+    let consecErrors = 0;
+
     while (index < rows.length) {
       const item = rows[index++];
       const id = String(item?.id ?? "").trim();
@@ -118,6 +158,20 @@ export async function runProcessIdFilterToTotal(): Promise<void> {
         await new Promise((r) => setTimeout(r, 2000));
         detail = await fetchPageDetail(id, author);
       }
+
+      if (!detail) {
+        consecErrors++;
+        console.warn(`[TikTokEnricher] No detail for ${id} — consecutive failures: ${consecErrors}/${MAX_CONSEC_ERRORS}`);
+        if (consecErrors >= MAX_CONSEC_ERRORS) {
+          console.error("[TikTokEnricher] Too many consecutive failures — stopping worker.");
+          break;
+        }
+        const humanDelay = Math.floor(Math.random() * 2000) + 1000;
+        await new Promise((r) => setTimeout(r, humanDelay));
+        continue;
+      }
+
+      consecErrors = 0;
 
       if (detail) {
         const stats = detail.stats;
@@ -137,11 +191,11 @@ export async function runProcessIdFilterToTotal(): Promise<void> {
           platform: "TikTok",
           postDate: createTime,
           hashtags: tags,
-          views: stats?.playCount ?? 0,
-          likes: stats?.diggCount ?? 0,
-          comments: stats?.commentCount ?? 0,
-          saves: stats?.collectCount ?? 0,
-          shares: stats?.shareCount ?? 0,
+          views: Number(stats?.playCount) || 0,
+          likes: Number(stats?.diggCount) || 0,
+          comments: Number(stats?.commentCount) || 0,
+          saves: Number(stats?.collectCount) || 0,
+          shares: Number(stats?.shareCount) || 0,
           total_view_growth: 0,
           url: item.url || `https://www.tiktok.com/@${author || "user"}/video/${id}`,
           fetchedAt: new Date().toISOString(),
@@ -152,13 +206,20 @@ export async function runProcessIdFilterToTotal(): Promise<void> {
         appendFileSync(TOTAL_FILE, `${JSON.stringify(record)}\n`, "utf8");
         savedCount++;
 
-        // Calculate viral metrics and append immediately
+        // Calculate viral metrics — only viral records go to MongoDB
         const postMs = new Date(record.postDate || new Date().toISOString()).getTime();
         if (Number.isFinite(postMs) && (Date.now() - postMs) / 3_600_000 <= env.maxVideoAgeDays * 24) {
-          const viralRecord = withViralMetrics(record);
-          if (viralRecord.viral_score >= env.viralScoreThreshold) {
+          const viralRecord = withViralMetrics(record, "tiktok");
+          if (viralRecord.video_phase !== "rejected") {
             appendFileSync(VIRAL_FILE, `${JSON.stringify(viralRecord)}\n`, "utf8");
             viralSavedCount++;
+            // Only confirmed viral (not seeds) go to MongoDB to avoid score=0 noise.
+            if (mongoAvailable && viralRecord.video_phase === "viral") {
+              const rawRecord = toRawRecord(id, record.url, detail, record);
+              await upsertVideo(rawRecord).catch((e: Error) =>
+                console.warn(`[MongoDB] upsert failed ${id}: ${e.message}`)
+              );
+            }
           }
         }
       } else {
@@ -179,8 +240,10 @@ export async function runProcessIdFilterToTotal(): Promise<void> {
 }
 
 
-runProcessIdFilterToTotal().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith("process-id-filter-to-total-tt.ts")) {
+  runProcessIdFilterToTotal().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}
 

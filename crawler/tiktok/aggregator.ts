@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import readline from "node:readline";
 import { resolve } from "node:path";
-import { withViralMetrics } from "../src/core/viral.calc.js";
+import { withViralMetrics } from "../src/core/viral-calc.js";
 import { env } from "./config/env.js";
 
 export async function runAggregator() {
@@ -23,7 +23,6 @@ export async function runAggregator() {
     crlfDelay: Infinity,
   });
 
-  const viralThreshold = env.viralScoreThreshold || 90;
   const maxAgeHours = (env.maxVideoAgeDays || 30) * 24;
 
   for await (const line of rl) {
@@ -33,16 +32,12 @@ export async function runAggregator() {
       totalCandidates++;
 
       const postMs = new Date(record.postDate || record.fetchedAt || new Date().toISOString()).getTime();
-      
-      // Tính tuổi của video (tính theo giờ)
       const ageHours = (Date.now() - postMs) / 3_600_000;
 
-      // Kiểm tra độ tuổi video có trong giới hạn cho phép không
       if (Number.isFinite(postMs) && ageHours <= maxAgeHours) {
-        // Tính toán lại điểm viral với công thức chuẩn
-        const scored = withViralMetrics(record);
+        const scored = withViralMetrics(record, "tiktok");
 
-        if (scored.viral_score >= viralThreshold) {
+        if (scored.video_phase !== "rejected") {
           stream.write(JSON.stringify(scored) + "\n");
           viralCount++;
         }
@@ -55,7 +50,7 @@ export async function runAggregator() {
   stream.end();
   console.log(`[aggregator] Aggregation complete!`);
   console.log(`[aggregator] Total candidates evaluated: ${totalCandidates}`);
-  console.log(`[aggregator] Viral videos found: ${viralCount} (threshold: ${viralThreshold}, max age: ${env.maxVideoAgeDays} days)`);
+  console.log(`[aggregator] Viral/seed videos found: ${viralCount} (max age: ${env.maxVideoAgeDays} days)`);
   console.log(`[aggregator] Viral videos saved to: ${OUTPUT_FILE}`);
 }
 

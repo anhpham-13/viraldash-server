@@ -87,8 +87,12 @@ crawler/tiktok/
 ├── filter-google-ids-tt.ts              Raw seed dedup → pending enrichment queue
 │
 │   ── Enrichment ──
-├── process-id-filter-to-total-tt.ts     Playwright stealth → TikTok page scraper
-├── rapid.worker.ts                      RapidAPI /v1/post/{id} → per-video enricher
+├── process-id-filter-to-total-tt.ts     Playwright stealth → TikTok page scraper → upsertVideo()
+├── rapid.worker.ts                      RapidAPI /v1/post/{id} → per-video enricher → upsertVideo()
+│
+│   ── Refresh loop ──
+├── meta-refresh-tt.ts                   Re-fetch stats → pushSnapshot() (Loop 2)
+├── refresh-viral-vids-tt.ts             DEAD — superseded by meta-refresh-tt.ts
 │
 │   ── Experimental normalization pipeline ──
 ├── normalize.ts                         Cross-source payload normalizer
