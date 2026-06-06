@@ -1,7 +1,7 @@
 import { existsSync, appendFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { readJsonLines, writeJsonLines } from "../src/core/jsonl.js";
-import { withViralMetrics } from "../src/core/viral.calc.js";
+import { withViralMetrics } from "../src/core/viral-calc.js";
 import { env } from "../src/config/env.js";
 
 const VIRAL_FILE = resolve(process.cwd(), "data/youtube/viral_vids_yt.jsonl");
@@ -179,8 +179,8 @@ async function recalculateViral(): Promise<void> {
       if (!Number.isFinite(postMs)) return false;
       return (nowMs - postMs) / 3_600_000 <= env.maxVideoAgeDays * 24;
     })
-    .map((row) => withViralMetrics(row))
-    .filter((row) => row.viral_score >= env.viralScoreThreshold)
+    .map((row) => withViralMetrics(row, "youtube"))
+    .filter((row) => row.video_phase !== "rejected")
     .sort((a, b) => b.viral_score - a.viral_score);
 
   await writeJsonLines(VIRAL_FILE, viralRows);

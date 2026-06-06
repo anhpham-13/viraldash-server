@@ -98,10 +98,10 @@ export async function runFilterGoogleIds(): Promise<void> {
   console.log(`Output: ${ID_FILTER_FILE}`);
 }
 
-// ─── Entrypoint guard (standalone CLI) ───────────────────────────────────────
-
-runFilterGoogleIds().catch((err) => {
-  console.error(err);
-  process.exitCode = 1;
-});
+if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith("filter-google-ids.ts")) {
+  runFilterGoogleIds().catch((err) => {
+    console.error(err);
+    process.exitCode = 1;
+  });
+}
 

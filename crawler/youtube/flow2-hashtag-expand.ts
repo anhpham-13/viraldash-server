@@ -37,8 +37,8 @@ async function main(): Promise<void> {
   const startMs = Date.now();
 
   // ── Step 1: Mine top hashtags from existing viral videos ─────────────────
-  step(1, 4, "Extract Hashtags  →  data/youtube/hashtag_yt.json");
-  runExtractHashtags(); // sync — reads data/youtube/viral_vids_yt.jsonl
+  step(1, 4, "Extract Hashtags  →  data/youtube/hashtag_yt.json + MongoDB hashtags");
+  await runExtractHashtags();
 
   // ── Step 2: YouTube Search API v3 — query-based discovery ────────────────
   step(2, 4, "Crawl API v3 Shorts  →  data/youtube/raw_google_output_yt.jsonl");

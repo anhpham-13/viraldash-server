@@ -1,8 +1,10 @@
 import { existsSync, readFileSync, appendFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { readJsonLines, writeJsonLines } from "../src/core/jsonl.js";
-import { withViralMetrics } from "../src/core/viral.calc.js";
+import { withViralMetrics } from "../src/core/viral-calc.js";
 import { env } from "../src/config/env.js";
+import { getDb, ensureIndexes, upsertVideo } from "../../shared/db/index.js";
+import type { RawCrawlerRecord } from "../../shared/types/index.js";
 
 const ID_FILTER_FILE = resolve(process.cwd(), "data/youtube/id_filter_yt.jsonl");
 const TOTAL_FILE = resolve(process.cwd(), "data/youtube/total_vids_yt.jsonl");
@@ -36,6 +38,28 @@ function filterSnippet(snippet: any) {
   return s;
 }
 
+// ─── RawCrawlerRecord normalization ──────────────────────────────────────────
+// YouTube API fields → canonical shared type. Called right before upsertVideo().
+function toRawRecord(id: string, url: string, item: any, viewCount: number, likes: number, comments: number, favorites: number): RawCrawlerRecord {
+  const now = new Date();
+  const title = item.snippet?.title ? String(item.snippet.title).trim() : "";
+  return {
+    video_id:     id,
+    platform:     "YouTube_Shorts",
+    url,
+    published_at: item.snippet?.publishedAt ? new Date(item.snippet.publishedAt) : now,
+    author:       String(item.snippet?.channelTitle || "YouTube").trim(),
+    ...(title && { title }),
+    hashtags:     Array.isArray(item.snippet?.tags) ? (item.snippet.tags as string[]) : [],
+    view_count:   viewCount,
+    likes,
+    comments,
+    shares:       0,
+    saves:        favorites,
+    fetched_at:   now,
+  };
+}
+
 function filterContentDetails(cd: any) {
   if (!cd || typeof cd !== "object") return {};
   const c = { ...cd };
@@ -62,6 +86,16 @@ async function loadExistingIds(): Promise<Set<string>> {
 }
 
 export async function runProcessIdFilterToTotal(): Promise<void> {
+  // ── MongoDB init (graceful degradation if not available) ─────────────────
+  let mongoAvailable = false;
+  try {
+    const db = await getDb();
+    await ensureIndexes(db);
+    mongoAvailable = true;
+  } catch (err: any) {
+    console.warn(`[MongoDB] Not available — running JSONL-only: ${(err as Error).message}`);
+  }
+
   const apiKey = process.env.YOUTUBE_DATA_API_KEY || process.env.YT_DATA_API_KEY;
   if (!apiKey) {
     throw new Error("Missing YOUTUBE_DATA_API_KEY or YT_DATA_API_KEY in env");
@@ -93,6 +127,7 @@ export async function runProcessIdFilterToTotal(): Promise<void> {
 
   console.log(`Calling YouTube API for ${idsToCall.length} ids in batches of 50.`);
 
+  const rawRecordMap = new Map<string, RawCrawlerRecord>();
   const batches = chunk(idsToCall, 50);
   for (let index = 0; index < batches.length; index++) {
     const batch = batches[index]!;
@@ -150,6 +185,9 @@ export async function runProcessIdFilterToTotal(): Promise<void> {
         };
 
         appendFileSync(TOTAL_FILE, `${JSON.stringify(record)}\n`, "utf8");
+
+        // Cache rawRecord — only viral ones will be upserted to MongoDB below
+        rawRecordMap.set(id, toRawRecord(id, urlById.get(id) || `https://www.youtube.com/shorts/${id}`, item, view_count, likes, comments, favorites));
       }
 
       // Remove requested ids (the whole batch) from id_filter once API succeeds
@@ -173,17 +211,39 @@ export async function runProcessIdFilterToTotal(): Promise<void> {
       if (!Number.isFinite(postMs)) return false;
       return (nowMs - postMs) / 3_600_000 <= env.maxVideoAgeDays * 24;
     })
-    .map((row) => withViralMetrics(row))
-    .filter((row) => row.viral_score >= env.viralScoreThreshold)
+    .map((row) => withViralMetrics(row, "youtube"))
+    .filter((row) => row.video_phase !== "rejected")
     .sort((a, b) => b.viral_score - a.viral_score);
 
   await writeJsonLines(VIRAL_FILE, viralRows);
   console.log(`Wrote ${viralRows.length} viral records to ${VIRAL_FILE}`);
+
+  // Only confirmed viral (not seeds) records go to MongoDB.
+  // Seed-phase records (age ≤ 2h) are stored in the JSONL for tracking but
+  // upserted to MongoDB they would get viral_score=0 (fails DB gate) and
+  // clutter the query results.
+  if (mongoAvailable) {
+    let upsertedCount = 0;
+    for (const viralRow of viralRows) {
+      if ((viralRow as any).video_phase !== "viral") continue;
+      const vid = String((viralRow as any).video_id ?? "").trim();
+      const rawRecord = rawRecordMap.get(vid);
+      if (rawRecord) {
+        await upsertVideo(rawRecord).catch((e: Error) =>
+          console.warn(`[MongoDB] upsert failed ${vid}: ${e.message}`)
+        );
+        upsertedCount++;
+      }
+    }
+    console.log(`[MongoDB] Upserted ${upsertedCount} viral records.`);
+  }
+
   console.log("Done.");
 }
 
-// ─── Entrypoint guard (standalone CLI) ───────────────────────────────────────
-runProcessIdFilterToTotal().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith("process-id-filter-to-total.ts")) {
+  runProcessIdFilterToTotal().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}

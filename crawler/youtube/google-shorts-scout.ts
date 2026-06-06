@@ -225,4 +225,9 @@ export async function runSearchPipeline() {
 }
 
 
-runSearchPipeline().catch(console.error);
+if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith("google-shorts-scout.ts")) {
+  runSearchPipeline().catch((err) => {
+    console.error(err);
+    process.exitCode = 1;
+  });
+}

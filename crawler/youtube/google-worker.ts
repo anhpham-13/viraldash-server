@@ -2,7 +2,7 @@ import fs from "node:fs";
 import { resolve } from "node:path";
 import { chromium } from "playwright-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
-import { BaseWorker, type BaseWorkerOptions } from "../src/core/base.worker.js";
+import { BaseWorker, type BaseWorkerOptions } from "../src/core/base-worker.js";
 import type { IVideoRecordCandidate } from "../src/core/types.js";
 import { env } from "../src/config/env.js";
 
@@ -91,6 +91,8 @@ export class GoogleStealthScraper {
 
     const page = await context.newPage();
     const uniqueById = new Map<string, GoogleSearchResult>();
+    const MAX_CONSEC_ERRORS = 2;
+    let consecErrors = 0;
 
     try {
       for (let index = 0; index < queries.length; index++) {
@@ -106,13 +108,15 @@ export class GoogleStealthScraper {
             console.warn("[GoogleScraper] CAPTCHA detected, waiting for noCaptcha extension...");
             await page
               .waitForURL((url) => !url.href.includes("google.com/sorry"), { timeout: 45_000 })
-              .catch(() => undefined);
+              .catch((captchaErr) => { throw captchaErr; }); // propagate to outer catch
           }
 
           const links = await page.evaluate(() => {
             const anchors = Array.from(document.querySelectorAll("a"));
             return anchors.map((item) => item.href).filter((href) => href.includes("youtube.com") || href.includes("youtu.be"));
           });
+
+          consecErrors = 0; // reset on successful page load + extraction
 
           for (const link of links) {
             const videoId = extractYouTubeShortsId(link);
@@ -130,7 +134,12 @@ export class GoogleStealthScraper {
             }
           }
         } catch (error) {
-          console.warn(`[GoogleScraper] Query failed: ${(error as Error).message}`);
+          consecErrors++;
+          console.warn(`[GoogleScraper] Query failed (${consecErrors}/${MAX_CONSEC_ERRORS}): ${(error as Error).message}`);
+          if (consecErrors >= MAX_CONSEC_ERRORS) {
+            console.error("[GoogleScraper] Too many consecutive errors — stopping scraper.");
+            break;
+          }
         }
 
         await page.waitForTimeout(1_500);
@@ -291,48 +300,69 @@ export class GoogleWorker extends BaseWorker {
     const concurrency = env.enricherConcurrency;
     let index = 0;
 
+    const MAX_ENRICH_CONSEC_ERRORS = 2;
+
     const worker = async () => {
+      let consecEnrichErrors = 0;
+
       while (index < uniqueCandidates.length) {
         const candidate = uniqueCandidates[index++];
         if (!candidate || !candidate.id) continue;
 
         console.log(`[GoogleWorker] Enriching [${index}/${uniqueCandidates.length}] video ID: ${candidate.id}`);
-        let detail = await fetchYouTubeVideoDetail(candidate.id);
+        let detail: YouTubeVideoDetail | null = null;
+        try {
+          detail = await fetchYouTubeVideoDetail(candidate.id);
+        } catch (err: any) {
+          console.warn(`[GoogleWorker] API error for ${candidate.id}: ${err.message}`);
+        }
 
         if (!detail) {
           // Retry once after 2 seconds
           await new Promise((r) => setTimeout(r, 2000));
-          detail = await fetchYouTubeVideoDetail(candidate.id);
+          try {
+            detail = await fetchYouTubeVideoDetail(candidate.id);
+          } catch { /* ignore retry error */ }
         }
 
-        if (detail) {
-          const snippet = detail.snippet ?? {};
-          const stats = detail.statistics ?? {};
-          
-          const patch: Partial<IVideoRecordCandidate> = {
-            author: snippet.channelTitle || candidate.author || "YouTube",
-            likes: Math.max(Number(candidate.likes ?? 0), Number(stats.likeCount ?? 0)),
-            views: Number(stats.viewCount ?? 0),
-            comments: Number(stats.commentCount ?? 0),
-            shares: 0,
-            saves: 0,
-            total_view_growth: 0,
-            hashtags: this.extractHashtags(`${snippet.title || ""} ${snippet.description || ""}`),
-            url: candidate.url || `https://www.youtube.com/shorts/${candidate.id}`,
-            sound: snippet.title || candidate.sound || "YouTube Shorts",
-          };
-
-          if (snippet.publishedAt) {
-            patch.postDate = new Date(snippet.publishedAt).toISOString();
+        if (!detail) {
+          consecEnrichErrors++;
+          console.warn(`[GoogleWorker] Enrichment failed for ${candidate.id} — consecutive failures: ${consecEnrichErrors}/${MAX_ENRICH_CONSEC_ERRORS}`);
+          if (consecEnrichErrors >= MAX_ENRICH_CONSEC_ERRORS) {
+            console.error("[GoogleWorker] Too many consecutive API failures — stopping enricher.");
+            break;
           }
-
-          enrichedCandidates.push({
-            ...candidate,
-            ...patch,
-          });
-        } else {
-          console.warn(`[GoogleWorker] Enrichment failed for video ID ${candidate.id}`);
+          const humanDelay = Math.floor(Math.random() * 3000) + 3000;
+          await new Promise((r) => setTimeout(r, humanDelay));
+          continue;
         }
+
+        consecEnrichErrors = 0;
+
+        const snippet = detail.snippet ?? {};
+        const stats = detail.statistics ?? {};
+
+        const patch: Partial<IVideoRecordCandidate> = {
+          author: snippet.channelTitle || candidate.author || "YouTube",
+          likes: Math.max(Number(candidate.likes ?? 0), Number(stats.likeCount ?? 0)),
+          views: Number(stats.viewCount ?? 0),
+          comments: Number(stats.commentCount ?? 0),
+          shares: 0,
+          saves: 0,
+          total_view_growth: 0,
+          hashtags: this.extractHashtags(`${snippet.title || ""} ${snippet.description || ""}`),
+          url: candidate.url || `https://www.youtube.com/shorts/${candidate.id}`,
+          sound: snippet.title || candidate.sound || "YouTube Shorts",
+        };
+
+        if (snippet.publishedAt) {
+          patch.postDate = new Date(snippet.publishedAt).toISOString();
+        }
+
+        enrichedCandidates.push({
+          ...candidate,
+          ...patch,
+        });
 
         // Random delay 3-6s simulated human delay between enrichment crawls
         const humanDelay = Math.floor(Math.random() * 3000) + 3000;

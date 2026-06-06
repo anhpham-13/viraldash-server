@@ -12,7 +12,7 @@ The pipeline operates in three independent flows, each targeting a different dis
 | **Flow 2** | Hashtag-driven YT Search API | Medium (Search API quota) | Topical expansion after Flow 1 has data |
 | **Flow 3** | Channel RSS feeds | Zero (no API calls) | Cheapest daily refresh from known channels |
 
-All three flows converge on the same enrichment step: calling the YouTube Data API v3 in batches of 50 IDs, storing raw enriched records in `total_vids_yt.jsonl`, and re-scoring to produce `viral_vids_yt.jsonl`.
+All three flows converge on the same enrichment step: calling the YouTube Data API v3 in batches of 50 IDs, writing enriched records to MongoDB via `upsertVideo()`, and appending to `data/youtube/total_vids_yt.jsonl` as an audit log.
 
 ---
 
@@ -62,8 +62,10 @@ crawler/youtube/
 ├── process-id-filter-to-total.ts   Shared enrichment + scoring step (all flows)
 ├── recalculate_viral.ts            Standalone re-scoring utility
 │
+├── meta-refresh-yt.ts              Refresh loop — re-fetches stats, calls pushSnapshot()
 ├── google-worker.ts                BaseWorker subclass (used by index.ts)
-├── google-flow-orchestrator.ts     Legacy all-in-one orchestrator
+├── google-flow-orchestrator.ts     Legacy all-in-one orchestrator (prefer flow1)
+├── refresh-viral-vids.ts           DEAD — superseded by meta-refresh-yt.ts
 ├── index.ts                        Main entry point (starts google-worker)
 └── polyfills.ts                    Node.js globalThis.File polyfill for Playwright
 ```
@@ -129,9 +131,6 @@ google-shorts-scout → filter-google-ids → process-id-filter-to-total
 
 **Run:**
 ```bash
-# From project root
-npm run flow:google-search
-# alias
 npm run yt:search
 ```
 
@@ -155,8 +154,6 @@ extract_hashtags → crawl_api_v3_shorts → filter-google-ids → process-id-fi
 
 **Run:**
 ```bash
-npm run flow:hashtag-expand
-# alias
 npm run yt:hashtag
 ```
 
@@ -179,8 +176,6 @@ process_ssr → filter-google-ids → process-id-filter-to-total
 
 **Run:**
 ```bash
-npm run flow:channel-expand
-# alias
 npm run yt:channel
 ```
 
@@ -293,7 +288,8 @@ npm run filter-id
 - Uses `snippet`, `statistics`, and `contentDetails` parts — thumbnails, titles, descriptions are stripped to keep file sizes small
 - Removes each processed batch from `id_filter_yt.jsonl` immediately after a successful API response, so an interrupted run can be safely restarted
 - Waits 1,200 ms between API batches to stay within rate limits
-- Viral scoring uses `withViralMetrics()` from `crawler/src/core/viral.calc.ts`
+- Viral scoring uses `withViralMetrics()` from `crawler/src/core/viral-calc.ts` (VIRAL_GATES apply here — discovery only)
+- Enriched records are written to MongoDB via `upsertVideo()` and appended to `total_vids_yt.jsonl` as an audit log
 - Only videos within `MAX_VIDEO_AGE_DAYS * 24` hours and with `viral_score ≥ VIRAL_SCORE_THRESHOLD` are written to `viral_vids_yt.jsonl`
 
 **Inputs:**
@@ -396,6 +392,22 @@ RUN_PIPELINE=true npm run yt:dev
 
 ---
 
+### `meta-refresh-yt.ts` — Refresh Loop
+
+**Purpose:** Queries MongoDB for viral videos whose `last_refreshed_at` is stale (older than `REFRESH_INTERVAL_HOURS`), re-fetches their stats via the YouTube Data API v3, and appends a new `VideoSnapshot` via `pushSnapshot()`. This is **Loop 2** — it runs independently of discovery.
+
+**Key behaviour:**
+- Only processes videos with `viral_score ≥ REFRESH_MIN_SCORE` and `published_at` within `REFRESH_MAX_AGE_HOURS`
+- `viral_acceleration` is computed from `rolling_velocity` change between consecutive snapshots. It remains `null` until at least **3 snapshots** exist (`prevSnap.delta_hours > 0` required)
+- `viral_velocity` stored in MongoDB = incremental `delta_views / delta_hours`, not lifetime average
+
+**Run:**
+```bash
+npm run yt:refresh
+```
+
+---
+
 ### `google-flow-orchestrator.ts` — Legacy Orchestrator
 
 **Purpose:** An older all-in-one script that runs `google-shorts-scout` via `spawnSync`, deduplicates IDs in memory, calls the YouTube Data API in batches, and writes viral videos. Predates the modular flow architecture.
@@ -406,6 +418,12 @@ RUN_PIPELINE=true npm run yt:dev
 ```bash
 npm run google-flow
 ```
+
+---
+
+### `refresh-viral-vids.ts` — DEAD (do not use)
+
+Superseded by `meta-refresh-yt.ts`. No npm script binding. Kept in repo history only.
 
 ---
 
@@ -447,29 +465,32 @@ cp .env.example .env
 
 ```bash
 # Day 1 (cold start — no existing data)
-npm run flow:google-search     # Discovers broad set via Google SERPs
+npm run yt:search       # Discovers broad set via Google SERPs → MongoDB
 
 # Day 2+ (incremental runs — all three flows)
-npm run flow:google-search     # Broad discovery
-npm run flow:hashtag-expand    # Topical expansion (requires prior viral_vids_yt.jsonl)
-npm run flow:channel-expand    # Zero-quota channel refresh (requires prior total_vids_yt.jsonl)
+npm run yt:search       # Broad discovery
+npm run yt:hashtag      # Topical expansion (requires prior viral_vids_yt.jsonl)
+npm run yt:channel      # Zero-quota channel refresh (requires prior total_vids_yt.jsonl)
+
+# Refresh loop (run separately, continuously or on schedule)
+npm run yt:refresh      # Re-fetch stats, push snapshots
 ```
 
 ### Running Individual Steps
 
 ```bash
-# Discovery steps only
-npm run google-scout           # Playwright scraper (produces raw_google_output_yt.jsonl)
-npm run process-ssr            # Channel RSS scraper (produces raw_google_output_yt.jsonl)
+# Discovery only
+npm run google-scout    # Playwright scraper → raw_google_output_yt.jsonl
+npm run process-ssr     # Channel RSS scraper → raw_google_output_yt.jsonl
 npx tsx crawler/youtube/crawl_api_v3_shorts.ts   # YT Search API (requires hashtag_yt.json)
 
-# Dedup + enrich (runs after any discovery step)
-npm run filter-id              # Dedup → id_filter_yt.jsonl
-npm run process-total          # Enrich + score → total_vids + viral_vids
+# Dedup + enrich
+npm run filter-id       # Dedup → id_filter_yt.jsonl
+npm run process-total   # Enrich + upsertVideo → MongoDB + total_vids_yt.jsonl
 
 # Utilities
-npx tsx crawler/youtube/recalculate_viral.ts    # Re-score without API calls
-npx tsx crawler/youtube/extract_hashtags.ts     # Rebuild hashtag_yt.json
+npx tsx crawler/youtube/recalculate_viral.ts     # Re-score JSONL without API calls
+npx tsx crawler/youtube/extract_hashtags.ts      # Rebuild hashtag_yt.json
 ```
 
 ### Force Re-score After Threshold Change

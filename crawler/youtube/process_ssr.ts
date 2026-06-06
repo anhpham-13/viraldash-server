@@ -3,7 +3,7 @@
 import { existsSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { appendJsonLines, readJsonLines, writeJsonLines } from "../src/core/jsonl.js";
-import { createFileBackedSeenIndex, type SeenIndex } from "../src/core/seenIndex.js";
+import { createFileBackedSeenIndex, type SeenIndex } from "../src/core/seen-index.js";
 
 const TOTAL_FILE = resolve(process.cwd(), "data/youtube/total_vids_yt.jsonl");
 const ID_CHANNELS_FILE = resolve(process.cwd(), "data/youtube/idChannels_yt.jsonl");

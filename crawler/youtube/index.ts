@@ -2,6 +2,7 @@ import "./polyfills.js";
 import { pathToFileURL } from "node:url";
 import { env } from "../src/config/env.js";
 import { GoogleWorker } from "./google-worker.js";
+import { syncHashtagsFromVideos } from "../../shared/db/index.js";
 
 async function main(): Promise<void> {
   if (!env.youtubeDataApiKey) {
@@ -27,6 +28,8 @@ async function main(): Promise<void> {
 
   const result = await worker.run();
   console.log(JSON.stringify(result, null, 2));
+
+  await syncHashtagsFromVideos("YouTube_Shorts");
 }
 
 const entryPoint = process.argv[1] ? pathToFileURL(process.argv[1]).href : undefined;
