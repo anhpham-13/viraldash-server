@@ -4,6 +4,7 @@ import { chromium } from "playwright-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import { readJsonLines, writeJsonLines } from "../src/core/jsonl.js";
 import { withViralMetrics } from "../src/core/viral-calc.js";
+import { isMain } from "../src/core/is-main.js";
 import { env } from "../src/config/env.js";
 import { getDb, ensureIndexes, upsertVideo } from "../../shared/db/index.js";
 import type { RawCrawlerRecord } from "../../shared/types/index.js";
@@ -240,7 +241,7 @@ export async function runProcessIdFilterToTotal(): Promise<void> {
 }
 
 
-if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith("process-id-filter-to-total-tt.ts")) {
+if (isMain(import.meta.url)) {
   runProcessIdFilterToTotal().catch((error) => {
     console.error(error);
     process.exitCode = 1;

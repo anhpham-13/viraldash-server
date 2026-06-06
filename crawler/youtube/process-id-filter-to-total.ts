@@ -44,19 +44,19 @@ function toRawRecord(id: string, url: string, item: any, viewCount: number, like
   const now = new Date();
   const title = item.snippet?.title ? String(item.snippet.title).trim() : "";
   return {
-    video_id:     id,
-    platform:     "YouTube_Shorts",
+    video_id: id,
+    platform: "YouTube_Shorts",
     url,
     published_at: item.snippet?.publishedAt ? new Date(item.snippet.publishedAt) : now,
-    author:       String(item.snippet?.channelTitle || "YouTube").trim(),
+    author: String(item.snippet?.channelTitle || "YouTube").trim(),
     ...(title && { title }),
-    hashtags:     Array.isArray(item.snippet?.tags) ? (item.snippet.tags as string[]) : [],
-    view_count:   viewCount,
+    hashtags: Array.isArray(item.snippet?.tags) ? (item.snippet.tags as string[]) : [],
+    view_count: viewCount,
     likes,
     comments,
-    shares:       0,
-    saves:        favorites,
-    fetched_at:   now,
+    shares: 0,
+    saves: favorites,
+    fetched_at: now,
   };
 }
 
@@ -241,9 +241,9 @@ export async function runProcessIdFilterToTotal(): Promise<void> {
   console.log("Done.");
 }
 
-if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith("process-id-filter-to-total.ts")) {
-  runProcessIdFilterToTotal().catch((error) => {
-    console.error(error);
-    process.exitCode = 1;
-  });
-}
+
+runProcessIdFilterToTotal().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
+

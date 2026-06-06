@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { syncHashtagsFromVideos } from "../../shared/db/index.js";
+import { isMain } from "../src/core/is-main.js";
 
 const INPUT_FILE = "data/tiktok/viral_vids_tt.jsonl";
 const OUTPUT_FILE = "data/tiktok/hashtag_tt.json";
@@ -407,7 +408,7 @@ export async function runExtractHashtags(): Promise<void> {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith("extract_hashtags.ts")) {
+if (isMain(import.meta.url)) {
   runExtractHashtags().catch((err) => {
     console.error(err);
     process.exitCode = 1;

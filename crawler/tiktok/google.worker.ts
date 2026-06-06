@@ -2,6 +2,7 @@ import "dotenv/config";
 import https from "node:https";
 import fs from "node:fs";
 import path from "node:path";
+import { isMain } from "../src/core/is-main.js";
 
 const OUTPUT_FILE = path.resolve(
   process.cwd(),
@@ -327,7 +328,7 @@ export async function runGoogleWorker() {
   );
 }
 
-if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith("google.worker.ts")) {
+if (isMain(import.meta.url)) {
   runGoogleWorker().catch((err) => {
     console.error(err);
     process.exitCode = 1;

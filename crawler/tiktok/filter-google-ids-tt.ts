@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { readJsonLines, writeJsonLines } from "../src/core/jsonl.js";
+import { isMain } from "../src/core/is-main.js";
 
 const RAW_FILE = resolve(process.cwd(), "data/tiktok/raw_google_output_tt.jsonl");
 const ID_FILTER_FILE = resolve(process.cwd(), "data/tiktok/id_filter_tt.jsonl");
@@ -106,10 +107,9 @@ export async function runFilterGoogleIds(): Promise<void> {
   console.log(`Output: ${ID_FILTER_FILE}`);
 }
 
-if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith("filter-google-ids-tt.ts")) {
+if (isMain(import.meta.url)) {
   runFilterGoogleIds().catch((err) => {
     console.error(err);
     process.exitCode = 1;
   });
 }
-

@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { readJsonLines } from "../src/core/jsonl.js";
 import { withViralMetrics } from "../src/core/viral-calc.js";
+import { isMain } from "../src/core/is-main.js";
 
 const ID_FILTER_FILE = resolve(process.cwd(), "data/instagram/id_filter_ig.jsonl");
 const TOTAL_FILE = resolve(process.cwd(), "data/instagram/total_posts_ig.jsonl");
@@ -173,7 +174,7 @@ export async function runRapidWorker() {
 }
 
 // Allow running standalone
-if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith("rapid-instagram.ts")) {
+if (isMain(import.meta.url)) {
   runRapidWorker().catch((error) => {
     console.error(error);
     process.exitCode = 1;

@@ -3,6 +3,7 @@ import readline from "node:readline";
 import { resolve } from "node:path";
 import { withViralMetrics } from "../src/core/viral-calc.js";
 import { env } from "./config/env.js";
+import { isMain } from "../src/core/is-main.js";
 
 export async function runAggregator() {
   const INPUT_FILE = resolve(process.cwd(), "data/tiktok/total_vids_tt.jsonl");
@@ -54,6 +55,6 @@ export async function runAggregator() {
   console.log(`[aggregator] Viral videos saved to: ${OUTPUT_FILE}`);
 }
 
-if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith("aggregator.ts")) {
+if (isMain(import.meta.url)) {
   runAggregator().catch(console.error);
 }

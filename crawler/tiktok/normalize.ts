@@ -2,6 +2,7 @@ import fs from "node:fs";
 import readline from "node:readline";
 import { resolve } from "node:path";
 import type { IVideoRecordCandidate } from "../src/core/types.js";
+import { isMain } from "../src/core/is-main.js";
 
 // -- Normalizer Helpers --
 function normalizeNumber(value: unknown): number {
@@ -303,6 +304,6 @@ export async function runNormalize() {
   console.log(`[normalize] Unique candidates saved to ${OUTPUT_FILE}: ${deduplicated}`);
 }
 
-if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith("normalize.ts")) {
+if (isMain(import.meta.url)) {
   runNormalize().catch(console.error);
 }

@@ -2,6 +2,7 @@ import { chromium, type BrowserContext, type Page } from "playwright";
 import { resolve } from "node:path";
 import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { readJsonLines } from "../src/core/jsonl.js";
+import { isMain } from "../src/core/is-main.js";
 
 // Cấu hình đường dẫn hệ thống
 const EXTENSION_PATH = resolve(process.cwd(), "crawler/extensions/nocaptchaai-extension");
@@ -225,7 +226,7 @@ export async function runSearchPipeline() {
 }
 
 
-if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith("google-shorts-scout.ts")) {
+if (isMain(import.meta.url)) {
   runSearchPipeline().catch((err) => {
     console.error(err);
     process.exitCode = 1;

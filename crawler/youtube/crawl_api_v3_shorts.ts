@@ -314,9 +314,7 @@ export async function runCrawlApiV3Shorts(): Promise<void> {
   console.log(`Done. ${seen.size} unique videos written to ${OUTPUT_FILE}`);
 }
 
-if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith("crawl_api_v3_shorts.ts")) {
-  runCrawlApiV3Shorts().catch((err) => {
-    console.error(err);
-    process.exitCode = 1;
-  });
-}
+runCrawlApiV3Shorts().catch((err) => {
+  console.error(err);
+  process.exitCode = 1;
+});
